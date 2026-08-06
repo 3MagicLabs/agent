@@ -1,4 +1,11 @@
 import os
+
+# Explicitly enable LangSmith tracing if API key is set
+if os.getenv("LANGCHAIN_API_KEY"):
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    if not os.getenv("LANGCHAIN_PROJECT"):
+        os.environ["LANGCHAIN_PROJECT"] = "default"
+
 from typing import TypedDict, Annotated, List, Sequence, Optional
 import operator
 from langchain_core.messages import BaseMessage
