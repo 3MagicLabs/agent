@@ -43,8 +43,8 @@ def route_web_agent(state: WebAgentState):
         print("\n[Web Agent]: Reached max iterations. Force quitting to prevent infinite loop.")
         return END
 
-    # If the LLM decides 
-    if last_message.tool_calls:
+    # If the LLM decides to call tools
+    if getattr(last_message, "tool_calls", None):
         return "tools"
 
     # if there are not tool calls, LLM finished synthesizing report

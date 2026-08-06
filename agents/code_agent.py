@@ -47,7 +47,7 @@ def route_code_agent(state: CodeAgentState):
         return END
         
     # If the LLM decided to call the python_repl tool, route to the tools node
-    if last_message.tool_calls:
+    if getattr(last_message, "tool_calls", None):
         return "tools"
         
     # If there are no tool calls, the LLM thinks it has the final answer
