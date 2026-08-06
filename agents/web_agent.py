@@ -9,13 +9,10 @@ from langgraph.prebuilt import ToolNode
 from state import WebAgentState
 from tools.web_tools import web_tools_list
 
+from agent import get_llm
+
 # Initialize the LLM and bind the web tools
-llm = ChatOpenAI(
-    base_url="https://router.huggingface.co/hf-inference/v1",
-    api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("OPENAI_API_KEY") or "hf_dummy",
-    model="Qwen/Qwen2.5-Coder-32B-Instruct",
-    temperature=0
-)
+llm = get_llm()
 llm_with_tools = llm.bind_tools(web_tools_list)
 
 sys_msg = SystemMessage(content="""You are the Web Research Specialist.

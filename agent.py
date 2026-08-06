@@ -22,12 +22,28 @@ class SupervisorRoute(BaseModel):
             description="Brief explanation of why this routing choice was made."
             )
 
-llm = ChatOpenAI(
-    base_url="https://router.huggingface.co/hf-inference/v1",
-    api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("OPENAI_API_KEY") or "hf_dummy",
-    model="Qwen/Qwen2.5-Coder-32B-Instruct",
-    temperature=0
-)
+def get_llm():
+    if os.getenv("GROQ_API_KEY"):
+        return ChatOpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.getenv("GROQ_API_KEY"),
+            model="llama-3.3-70b-versatile",
+            temperature=0
+        )
+    elif os.getenv("OPENAI_API_KEY"):
+        return ChatOpenAI(
+            model="gpt-4o",
+            temperature=0
+        )
+    else:
+        return ChatOpenAI(
+            base_url="https://router.huggingface.co/hf-inference/v1",
+            api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or "",
+            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            temperature=0
+        )
+
+llm = get_llm()
 supervisor_router = llm.with_structured_output(SupervisorRoute)
 
 supervisor_sys_msg = SystemMessage(content="""You are the Executive Supervisor of a multi-agent system solving GAIA benchmark tasks.
