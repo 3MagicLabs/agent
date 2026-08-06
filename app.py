@@ -3,7 +3,8 @@ import gradio as gr
 import requests
 import inspect
 import pandas as pd
-
+from agent import compiled_orchestrator
+from langchain_core.messages import HumanMessage
 # (Keep Constants as is)
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
@@ -12,13 +13,14 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 class BasicAgent:
     def __init__(self):
-        print("BasicAgent initialized.")
+        print("Supervisor Multi-Agent initialized.")
     def __call__(self, question: str) -> str:
-        print(f"Agent received question (first 50 chars): {question[:50]}...")
-        fixed_answer = "This is a default answer."
-        print(f"Agent returning fixed answer: {fixed_answer}")
-        return fixed_answer
+        print(f"\n[Running Supervisor Agent]: {question[:80]}...")
 
+        state = {"messages": [HumanMessage(content=question)]}
+        final_state = compiled_orchestrator.invoke(state)
+
+        return str(final_state["messages"][-1].content)
 def run_and_submit_all( profile: gr.OAuthProfile | None):
     """
     Fetches all questions, runs the BasicAgent on them, submits all answers,

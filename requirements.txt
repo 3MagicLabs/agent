@@ -1,2 +1,13 @@
 gradio
 requests
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langgraph
+pydantic
+pandas
+beautifulsoup4
+e2b-code-interpreter
+tavily-python
+openai
