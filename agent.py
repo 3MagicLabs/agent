@@ -23,7 +23,7 @@ class SupervisorRoute(BaseModel):
             )
 
 llm = get_llm()
-supervisor_router = llm.with_structured_output(SupervisorRoute)
+supervisor_router = llm.with_structured_output(SupervisorRoute, method="function_calling")
 
 supervisor_sys_msg = SystemMessage(content="""You are the Executive Supervisor of a multi-agent system solving GAIA benchmark tasks.
 Your job is to route incoming requests to the appropriate specialist agent:
