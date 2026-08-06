@@ -1,7 +1,11 @@
 # tools/code_tools.py
 from langchain_core.tools import tool
-from e2b_code_interpreter import CodeInterpreter
 import os
+
+try:
+    from e2b_code_interpreter import CodeInterpreter
+except ImportError:
+    from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 
 @tool
