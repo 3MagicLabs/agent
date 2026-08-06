@@ -8,7 +8,7 @@ from langchain_core.messages import SystemMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
 
 # 1. Import your Manager state schema and compiled specalists subgraphs
-from state import ManagerAgentState
+from state import ManagerAgentState, get_llm
 from agents.code_agent import code_agent_subgraph
 from agents.web_agent import web_agent_subgraph
 
@@ -21,27 +21,6 @@ class SupervisorRoute(BaseModel):
     reasoning: str = Field(
             description="Brief explanation of why this routing choice was made."
             )
-
-def get_llm():
-    if os.getenv("GROQ_API_KEY"):
-        return ChatOpenAI(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.getenv("GROQ_API_KEY"),
-            model="llama-3.3-70b-versatile",
-            temperature=0
-        )
-    elif os.getenv("OPENAI_API_KEY"):
-        return ChatOpenAI(
-            model="gpt-4o",
-            temperature=0
-        )
-    else:
-        return ChatOpenAI(
-            base_url="https://router.huggingface.co/hf-inference/v1",
-            api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or "",
-            model="Qwen/Qwen2.5-Coder-32B-Instruct",
-            temperature=0
-        )
 
 llm = get_llm()
 supervisor_router = llm.with_structured_output(SupervisorRoute)

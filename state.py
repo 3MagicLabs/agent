@@ -1,7 +1,29 @@
-# state.py
+import os
 from typing import TypedDict, Annotated, List, Sequence, Optional
 import operator
 from langchain_core.messages import BaseMessage
+from langchain_openai import ChatOpenAI
+
+def get_llm():
+    if os.getenv("GROQ_API_KEY"):
+        return ChatOpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.getenv("GROQ_API_KEY"),
+            model="llama-3.3-70b-versatile",
+            temperature=0
+        )
+    elif os.getenv("OPENAI_API_KEY"):
+        return ChatOpenAI(
+            model="gpt-4o",
+            temperature=0
+        )
+    else:
+        return ChatOpenAI(
+            base_url="https://router.huggingface.co/hf-inference/v1",
+            api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or "",
+            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            temperature=0
+        )
 
 class ManagerAgentState(TypedDict):
 

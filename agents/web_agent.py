@@ -6,10 +6,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 
 # 1. Import your WebAgentState and pre-packaged tools
-from state import WebAgentState
+from state import WebAgentState, get_llm
 from tools.web_tools import web_tools_list
-
-from agent import get_llm
 
 # Initialize the LLM and bind the web tools
 llm = get_llm()

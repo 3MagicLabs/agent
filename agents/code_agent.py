@@ -6,10 +6,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 
 # 1. Import your specific CodeAgentState and your REPL tool
-from state import CodeAgentState
+from state import CodeAgentState, get_llm
 from tools.code_tools import python_repl 
-
-from agent import get_llm
 
 llm = get_llm()
 tools = [python_repl]
