@@ -16,8 +16,9 @@ def get_llm():
         return ChatOpenAI(
             base_url="https://api.groq.com/openai/v1",
             api_key=os.getenv("GROQ_API_KEY"),
-            model="llama-3.3-70b-versatile",
-            temperature=0
+            model="llama-3.1-8b-instant",
+            temperature=0,
+            max_retries=5
         )
     elif os.getenv("OPENAI_API_KEY"):
         return ChatOpenAI(
