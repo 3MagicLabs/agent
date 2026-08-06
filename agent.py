@@ -25,7 +25,7 @@ class SupervisorRoute(BaseModel):
 llm = ChatOpenAI(
     base_url="https://router.huggingface.co/hf-inference/v1",
     api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("OPENAI_API_KEY") or "hf_dummy",
-    model="meta-llama/Llama-3.3-70B-Instruct",
+    model="Qwen/Qwen2.5-Coder-32B-Instruct",
     temperature=0
 )
 supervisor_router = llm.with_structured_output(SupervisorRoute)

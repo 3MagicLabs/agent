@@ -13,7 +13,7 @@ from tools.web_tools import web_tools_list
 llm = ChatOpenAI(
     base_url="https://router.huggingface.co/hf-inference/v1",
     api_key=os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("OPENAI_API_KEY") or "hf_dummy",
-    model="meta-llama/Llama-3.3-70B-Instruct",
+    model="Qwen/Qwen2.5-Coder-32B-Instruct",
     temperature=0
 )
 llm_with_tools = llm.bind_tools(web_tools_list)
