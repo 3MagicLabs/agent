@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+      - name: Ruff format check
+        run: ruff format --check --diff .
+
+  types:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev,tools,app]"
+      - run: mypy
+
+  test:
+    name: Test (py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+        include:
+          - python: "3.12"
+            os: macos-latest
+          - python: "3.12"
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv pip install --system -e ".[dev,tools,app]"
+      - name: Unit tests
+        run: pytest -m unit --cov --cov-report=xml --cov-report=term
+      - name: Enforce coverage floor
+        if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'
+        run: coverage report --fail-under=80
+      - name: Upload coverage
+        if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv build
+      - name: Verify metadata
+        run: |
+          uv pip install --system twine
+          twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  space-parity:
+    name: Space entry point imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - name: Install exactly what the Space installs
+        run: uv pip install --system -r requirements.txt
+      - name: Import app.py with no credentials
+        # The Space imports app.py before serving; an import-time credential
+        # check here is a production outage, so it is a CI gate.
+        run: python -c "import app; print('app.py imports cleanly')"
+
+  ci-ok:
+    name: CI
+    if: always()
+    needs: [lint, types, test, build, space-parity]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "All checks passed."

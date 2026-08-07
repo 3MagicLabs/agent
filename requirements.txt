@@ -1,13 +1,18 @@
-gradio
-requests
-langchain
-langchain-core
-langchain-openai
-langchain-community
-langgraph
-pydantic
-pandas
-beautifulsoup4
-e2b-code-interpreter
-tavily-python
-openai
+# Hugging Face Space runtime dependencies.
+# The canonical dependency list is pyproject.toml; this mirrors it because the
+# Space installs from requirements.txt. CI's "space-parity" job installs exactly
+# this file and imports app.py, so drift is caught before deploy.
+gradio==5.25.2
+pandas>=2.2,<3
+requests>=2.32,<3
+pydantic>=2.10,<3
+
+langchain-core>=1.5,<2
+langchain-openai>=1.4,<2
+langgraph>=1.2,<2
+langsmith>=0.10,<1
+
+beautifulsoup4>=4.12,<5
+tavily-python>=0.7,<1
+e2b-code-interpreter>=2.9,<3
+openpyxl>=3.1,<4

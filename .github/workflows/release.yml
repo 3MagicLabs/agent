@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - name: Verify the tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(uv run python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag $TAG does not match pyproject version $VERSION" >&2
+            exit 1
+          fi
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Only runs once a PyPI trusted publisher is configured for this repo.
+    if: vars.PUBLISH_TO_PYPI == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/3magic-agent
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

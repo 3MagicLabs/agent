@@ -1,0 +1,118 @@
+"""Shared fixtures.
+
+Every unit test runs with a clean environment and a stub model, so the suite
+needs no credentials and makes no network calls.
+"""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+from langchain_core.messages import AIMessage, BaseMessage
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from agent.config import Settings, reset_settings, set_settings
+
+CREDENTIAL_VARS = (
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "HF_TOKEN",
+    "HUGGINGFACEHUB_API_TOKEN",
+    "TAVILY_API_KEY",
+    "E2B_API_KEY",
+    "LANGSMITH_API_KEY",
+    "LANGCHAIN_API_KEY",
+    "LANGSMITH_TRACING",
+    "LANGCHAIN_TRACING_V2",
+)
+
+
+class StubRouter:
+    """Stands in for ``llm.with_structured_output(...)``."""
+
+    def __init__(self, model_cls: type, next_agent: str, reasoning: str = "stub") -> None:
+        self._model_cls = model_cls
+        self._next_agent = next_agent
+        self._reasoning = reasoning
+
+    def invoke(self, _messages: Sequence[BaseMessage]) -> Any:
+        return self._model_cls(next_agent=self._next_agent, reasoning=self._reasoning)
+
+
+class StubLLM:
+    """Deterministic chat model. ``route_to`` drives the supervisor's choice."""
+
+    def __init__(self, reply: str = "stub answer", route_to: str = "FINISH") -> None:
+        self.reply = reply
+        self.route_to = route_to
+        self.calls: list[list[BaseMessage]] = []
+
+    def with_structured_output(self, model_cls: type, **_kwargs: Any) -> StubRouter:
+        return StubRouter(model_cls, self.route_to)
+
+    def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
+        return self
+
+    def invoke(self, messages: Sequence[BaseMessage]) -> AIMessage:
+        self.calls.append(list(messages))
+        return AIMessage(content=self.reply)
+
+
+class FailingLLM:
+    """Raises on every call, to exercise error paths."""
+
+    def with_structured_output(self, *_args: Any, **_kwargs: Any) -> FailingLLM:
+        return self
+
+    def bind_tools(self, *_args: Any, **_kwargs: Any) -> FailingLLM:
+        return self
+
+    def invoke(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("provider exploded")
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch, tmp_path):
+    """No credentials, and all writes land in a temp directory."""
+    for name in CREDENTIAL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    reset_settings()
+    set_settings(Settings(log_dir=tmp_path / "logs", download_dir=tmp_path / "downloads"))
+    yield
+    reset_settings()
+
+
+@pytest.fixture
+def settings():
+    from agent.config import get_settings
+
+    return get_settings()
+
+
+@pytest.fixture
+def stub_llm(monkeypatch):
+    """Install a StubLLM everywhere the graph resolves a model."""
+
+    def _install(reply: str = "stub answer", route_to: str = "FINISH") -> StubLLM:
+        llm = StubLLM(reply=reply, route_to=route_to)
+        monkeypatch.setattr("agent.core.graph.get_llm", lambda: llm)
+        monkeypatch.setattr("agent.agents.base.get_llm", lambda: llm)
+        return llm
+
+    return _install
+
+
+@pytest.fixture
+def failing_llm(monkeypatch):
+    def _install() -> FailingLLM:
+        llm = FailingLLM()
+        monkeypatch.setattr("agent.core.graph.get_llm", lambda: llm)
+        monkeypatch.setattr("agent.agents.base.get_llm", lambda: llm)
+        return llm
+
+    return _install

@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a capability, tool, or specialist
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the task the agent cannot currently complete.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this?
+      options:
+        - New tool
+        - New specialist agent
+        - Orchestration / routing
+        - Observability or evaluation
+        - Developer experience
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+    validations:
+      required: true
+
+  - type: dropdown
+    id: benchmark
+    attributes:
+      label: Which GAIA level does this unblock?
+      options:
+        - "Level 1"
+        - "Level 2"
+        - "Level 3"
+        - "Not benchmark-related"
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -1,0 +1,38 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Push to the Space
+    runs-on: ubuntu-latest
+    # Configure the HF_SPACE variable and HF_TOKEN secret to enable this.
+    if: vars.HF_SPACE != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "HF_TOKEN secret is not set; skipping." >&2
+            exit 1
+          fi
+          git push --force \
+            "https://oauth:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" \
+            HEAD:refs/heads/main

@@ -1,0 +1,146 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "3magic-agent"
+version = "0.1.0"
+description = "A supervisor multi-agent system for autonomous research, reasoning and code execution."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "3MagicLabs" }]
+keywords = ["ai", "agents", "langgraph", "llm", "gaia", "multi-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+
+dependencies = [
+  "langchain-core>=1.5,<2",
+  "langchain-openai>=1.4,<2",
+  "langgraph>=1.2,<2",
+  "langsmith>=0.10,<1",
+  "pydantic>=2.10,<3",
+  "requests>=2.32,<3",
+  "beautifulsoup4>=4.12,<5",
+]
+
+[project.optional-dependencies]
+tools = [
+  "tavily-python>=0.7,<1",
+  "e2b-code-interpreter>=2.9,<3",
+  "openpyxl>=3.1,<4",
+]
+app = [
+  "gradio==5.25.2",
+  "pandas>=2.2,<3",
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "types-requests",
+  "pre-commit>=4.0",
+  "pip-audit>=2.7",
+]
+all = ["3magic-agent[tools,app,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/3MagicLabs/agent"
+Repository = "https://github.com/3MagicLabs/agent"
+Issues = "https://github.com/3MagicLabs/agent/issues"
+Changelog = "https://github.com/3MagicLabs/agent/blob/main/CHANGELOG.md"
+
+[project.scripts]
+agent = "agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent"]
+
+# --- Ruff -------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",    # pycodestyle
+  "F",         # pyflakes
+  "I",         # isort
+  "N",         # pep8-naming
+  "UP",        # pyupgrade
+  "B",         # bugbear
+  "A",         # builtins shadowing
+  "C4",        # comprehensions
+  "SIM",       # simplify
+  "PTH",       # use pathlib
+  "RET",       # return consistency
+  "ARG",       # unused arguments
+  "TID",       # tidy imports
+  "S",         # bandit security
+  "BLE",       # blind except
+  "ANN",       # type annotations
+  "RUF",
+]
+ignore = [
+  "ANN401",  # allow typing.Any where genuinely dynamic (LLM payloads)
+  "S101",    # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S", "ARG", "RUF012", "E501", "SLF001"]
+"app.py" = ["ANN"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+# --- mypy -------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+warn_unreachable = true
+disallow_untyped_decorators = false   # langchain's @tool is untyped
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "langchain_core.*", "langchain_openai.*", "tavily.*", "e2b_code_interpreter.*", "gradio.*", "bs4.*"]
+ignore_missing_imports = true
+
+# --- pytest -----------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+  "unit: fast, no network, no credentials",
+  "integration: needs live provider credentials",
+  "e2e: full run against the scoring API",
+]
+filterwarnings = ["ignore::UserWarning:gradio.*"]
+
+# --- coverage ---------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/agent"]
+branch = true
+omit = ["*/cli.py"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]

@@ -1,0 +1,11 @@
+# Default owner for everything.
+*                       @wimaan3
+
+# Orchestration and budgets: changes here can cause runaway loops.
+/src/agent/core/        @wimaan3
+/src/agent/agents/      @wimaan3
+
+# Security-sensitive surfaces.
+/src/agent/tools/       @wimaan3
+/.github/workflows/     @wimaan3
+/SECURITY.md            @wimaan3

@@ -1,0 +1,47 @@
+site_name: 3MagicLabs Agent
+site_description: A supervisor multi-agent system for autonomous research, reasoning and code execution.
+repo_url: https://github.com/3MagicLabs/agent
+repo_name: 3MagicLabs/agent
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Configuration: configuration.md
+  - Observability: observability.md
+  - GAIA benchmark: gaia.md
+  - Roadmap: roadmap.md
+  - Decisions:
+      - ADR index: adr/index.md
+      - "0001 Supervisor topology": adr/0001-supervisor-topology.md
+      - "0002 Budgets over retries": adr/0002-budgets-over-retries.md
+      - "0003 Lazy tool initialisation": adr/0003-lazy-tool-initialisation.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - tables
+  - toc:
+      permalink: true

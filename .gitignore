@@ -1,3 +1,28 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.env
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Docs build
+site/
+
+# Runtime artefacts (logs, metrics, cached answers, downloads)
+logs/
+
+# OS
 .DS_Store
