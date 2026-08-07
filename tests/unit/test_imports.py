@@ -56,3 +56,30 @@ def test_cli_parser_builds():
     args = build_parser().parse_args(["run", "--limit", "3"])
 
     assert args.limit == 3
+
+
+class TestSpaceEntryPoint:
+    """gradio's mocked OAuth validates the local HF token while Blocks closes,
+    which raises during import. These pin the guard that avoids that path."""
+
+    def test_imports_with_a_stale_hf_token(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_invalid_token")
+        monkeypatch.delenv("SPACE_ID", raising=False)
+        importlib.reload(importlib.import_module("app"))
+
+    def test_no_oauth_component_outside_a_space(self, monkeypatch):
+        import app
+
+        monkeypatch.delenv("SPACE_ID", raising=False)
+        monkeypatch.delenv("OAUTH_CLIENT_ID", raising=False)
+        assert app.in_hosted_space() is False
+
+    def test_oauth_only_when_hf_provisions_it(self, monkeypatch):
+        import app
+
+        monkeypatch.setenv("SPACE_ID", "user/space")
+        monkeypatch.delenv("OAUTH_CLIENT_ID", raising=False)
+        assert app.in_hosted_space() is False, "SPACE_ID alone means mocked OAuth"
+
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "abc123")
+        assert app.in_hosted_space() is True

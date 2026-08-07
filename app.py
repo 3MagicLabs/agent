@@ -96,6 +96,31 @@ def metrics_table() -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame([{"info": "No metrics recorded yet."}])
 
 
+def in_hosted_space() -> bool:
+    """True only when real, HF-provisioned OAuth is available.
+
+    Outside a Space, gradio falls back to *mocked* OAuth, which validates the
+    local HF token while `gr.Blocks` is closing — so a missing or stale token
+    raises during import, before anything can catch it. That mocked path is
+    also the one that served the host's own token to any visitor
+    (PYSEC-2026-63). We never opt into it: no OAuth component is created
+    unless HF itself provisioned the OAuth environment.
+    """
+    return bool(os.getenv("SPACE_ID") and os.getenv("OAUTH_CLIENT_ID"))
+
+
+def login_control() -> None:
+    """Render the HF login button, or explain how to submit without it."""
+    if in_hosted_space():
+        gr.LoginButton()
+        return
+
+    gr.Markdown(
+        "_Hugging Face login is available only when running inside a Space. "
+        "Locally, submit from the CLI instead: `agent submit --username <hf-user>`._"
+    )
+
+
 def status_report() -> str:
     settings = get_settings()
     return json.dumps(
@@ -120,7 +145,7 @@ with gr.Blocks(title="3MagicLabs Agent") as demo:
         """
     )
 
-    gr.LoginButton()
+    login_control()
 
     reuse = gr.Checkbox(value=True, label="Reuse cached answers (skip already-answered tasks)")
     with gr.Row():
