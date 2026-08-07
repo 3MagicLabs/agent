@@ -19,7 +19,7 @@ jobs:
     # Configure the HF_SPACE variable and HF_TOKEN secret to enable this.
     if: vars.HF_SPACE != ''
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           lfs: true
