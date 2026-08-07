@@ -14,7 +14,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))  # so `import app` (the Space entry point) resolves
 
 from agent.config import Settings, reset_settings, set_settings
 

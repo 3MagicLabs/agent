@@ -9,7 +9,7 @@ Two separate production outages had the same shape.
 A search client was constructed at module scope:
 
 ```python
-tavily_search_tool = TavilySearchResults(max_results=3)   # at import time
+tavily_search_tool = TavilySearchResults(max_results=3)  # at import time
 ```
 
 Without `TAVILY_API_KEY` this raises a pydantic `ValidationError`. The import

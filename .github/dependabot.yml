@@ -20,9 +20,9 @@ updates:
       minor-and-patch:
         update-types: ["minor", "patch"]
     ignore:
-      # Pinned to the Space's declared sdk_version in README.md; bump both together.
+      # gradio's major must match the Space's sdk_version in README.md.
       - dependency-name: gradio
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"

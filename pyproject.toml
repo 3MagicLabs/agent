@@ -39,7 +39,7 @@ tools = [
   "openpyxl>=3.1,<4",
 ]
 app = [
-  "gradio==5.25.2",
+  "gradio[oauth]>=6.15,<7",
   "pandas>=2.2,<3",
 ]
 dev = [
@@ -98,7 +98,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ANN", "S", "ARG", "RUF012", "E501", "SLF001"]
+# E402: conftest must extend sys.path before importing the package.
+"tests/**" = ["ANN", "S", "ARG", "RUF012", "E501", "SLF001", "E402"]
 "app.py" = ["ANN"]
 
 [tool.ruff.lint.flake8-tidy-imports]
@@ -106,7 +107,7 @@ ban-relative-imports = "parents"
 
 # --- mypy -------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"  # numpy stubs require 3.12+ syntax
 files = ["src"]
 strict = true
 warn_unreachable = true
