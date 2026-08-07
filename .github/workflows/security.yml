@@ -37,8 +37,10 @@ jobs:
           python-version: "3.12"
       - run: uv pip install --system -e ".[dev,tools,app]"
       - name: pip-audit
-        # --skip-editable: this project itself is not on PyPI.
-        run: pip-audit --strict --desc --skip-editable
+        # --skip-editable: this project itself is not on PyPI. --strict is
+        # omitted because it treats that intentional skip as a failure;
+        # pip-audit still exits non-zero when a vulnerability is found.
+        run: pip-audit --desc --skip-editable
 
   scorecard:
     name: OSSF Scorecard
