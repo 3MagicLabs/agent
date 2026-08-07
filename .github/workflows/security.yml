@@ -37,7 +37,8 @@ jobs:
           python-version: "3.12"
       - run: uv pip install --system -e ".[dev,tools,app]"
       - name: pip-audit
-        run: pip-audit --strict --desc
+        # --skip-editable: this project itself is not on PyPI.
+        run: pip-audit --strict --desc --skip-editable
 
   scorecard:
     name: OSSF Scorecard
