@@ -20,10 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv python install 3.12
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Build with MkDocs
         run: |
-          uv pip install --system mkdocs-material
+          # Pinned: MkDocs 2.0 removes the plugin system with no migration path.
+          uv pip install --system "mkdocs<2" "mkdocs-material>=9,<10"
           mkdocs build --strict
       - uses: actions/upload-pages-artifact@v3
         with:
