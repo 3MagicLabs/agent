@@ -130,8 +130,23 @@ class Settings:
 
 
 def _resolve_provider() -> tuple[Provider | None, str, str, str]:
-    """Pick the first configured provider. Returns (provider, model, base_url, key)."""
-    for provider, env_names in PROVIDER_KEYS:
+    """Pick the provider to use. Returns (provider, model, base_url, key).
+
+    ``LLM_PROVIDER`` names one explicitly. Without it the first key present
+    wins, in ``PROVIDER_KEYS`` order.
+
+    An explicit choice whose key is missing resolves to nothing rather than
+    falling through to the next provider. Silent fallthrough is how a spent or
+    unfunded key keeps getting used while you believe you switched away from it.
+    """
+    requested = os.getenv("LLM_PROVIDER", "").strip().lower()
+    candidates = (
+        tuple(entry for entry in PROVIDER_KEYS if entry[0] == requested)
+        if requested
+        else PROVIDER_KEYS
+    )
+
+    for provider, env_names in candidates:
         key = next((os.environ[n] for n in env_names if os.environ.get(n)), "")
         if not key:
             continue

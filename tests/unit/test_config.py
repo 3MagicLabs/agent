@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent.config import Settings, load_settings, reset_settings
+from agent.config import Settings, get_settings, load_settings, reset_settings
 from agent.core.llm import MissingCredentialsError, build_llm
 
 pytestmark = pytest.mark.unit
@@ -80,3 +80,47 @@ class TestInvalidEnvironment:
         """Import must never fail; construction is where it surfaces."""
         with pytest.raises(MissingCredentialsError, match="No LLM credentials"):
             build_llm(Settings())
+
+
+class TestProviderSelector:
+    """Ordering alone is not enough once more than one key is real.
+
+    With Groq's daily quota spent, GROQ_API_KEY still won the scan and the
+    HF token sat unused - the failure looked like an outage, not a config bug.
+    """
+
+    def test_named_provider_wins_over_the_scan_order(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("HF_TOKEN", "h")
+        monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+        reset_settings()
+
+        assert get_settings().provider == "huggingface"
+
+    def test_scan_order_still_applies_when_unset(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("HF_TOKEN", "h")
+        reset_settings()
+
+        assert get_settings().provider == "groq"
+
+    def test_a_named_provider_without_a_key_does_not_fall_through(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+        reset_settings()
+
+        assert get_settings().provider is None
+
+    def test_an_unknown_provider_name_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("LLM_PROVIDER", "nonsense")
+        reset_settings()
+
+        assert get_settings().provider is None
+
+    def test_the_name_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "h")
+        monkeypatch.setenv("LLM_PROVIDER", "HuggingFace")
+        reset_settings()
+
+        assert get_settings().provider == "huggingface"

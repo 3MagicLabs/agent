@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))  # so `import app` (the Space entry point) resolve
 from agent.config import Settings, reset_settings, set_settings
 
 CREDENTIAL_VARS = (
+    "LLM_PROVIDER",
     "GROQ_API_KEY",
     "OPENAI_API_KEY",
     "HF_TOKEN",
