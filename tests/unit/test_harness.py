@@ -8,6 +8,7 @@ import pytest
 
 from agent.config import Settings, set_settings
 from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
+from agent.obs.metrics import TaskMetric
 
 pytestmark = pytest.mark.unit
 
@@ -211,3 +212,29 @@ class TestAnswerValidation:
         list(runner.run(QUESTIONS, reuse_cache=False))
 
         assert runner.cache.load() == {}
+
+
+class TestPacing:
+    """A 20-task run spent its whole per-minute quota on the first six tasks."""
+
+    def _metric(self, tokens: int, latency: float) -> TaskMetric:
+        return TaskMetric(
+            task_id="t", question="q", tokens={"total_tokens": tokens}, latency_s=latency
+        )
+
+    def test_waits_for_the_rest_of_the_token_window(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        # 6000 tokens is half a minute of quota; 10s were already spent running.
+        assert make_runner(None).pause_for(self._metric(6000, 10.0)) == pytest.approx(20.0)
+
+    def test_a_slow_task_needs_no_extra_wait(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        assert make_runner(None).pause_for(self._metric(1000, 90.0)) == 0.0
+
+    def test_pacing_is_disabled_by_a_zero_rate(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=0))
+        assert make_runner(None).pause_for(self._metric(60000, 0.0)) == 0.0
+
+    def test_unmeasured_tokens_do_not_stall_the_run(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        assert make_runner(None).pause_for(self._metric(0, 1.0)) == 0.0

@@ -201,6 +201,22 @@ class BenchmarkRunner:
             model=self.settings.model,
         )
 
+    def pause_for(self, metric: TaskMetric) -> float:
+        """Seconds to wait so the run stays under the provider's token rate.
+
+        A task costing N tokens occupies N/tpm of a minute. The task's own
+        latency already spent part of that window, so only the remainder is
+        slept. Measured, not guessed: a 20-task run spent its entire minute on
+        the first six tasks and took 429s on the other fourteen - and the
+        throttling degraded the answers that did get through, so this is a
+        correctness fix as much as a completion one.
+        """
+        rate = self.settings.tokens_per_minute
+        used = int(metric.tokens.get("total_tokens", 0))
+        if rate <= 0 or used <= 0:
+            return 0.0
+        return max(0.0, used / rate * 60.0 - metric.latency_s)
+
     def run(
         self,
         questions: list[dict[str, Any]] | None = None,
@@ -251,6 +267,11 @@ class BenchmarkRunner:
                 message=f"[{index}/{total}] {task_id}: {metric.status} ({metric.latency_s:.0f}s)",
                 metric=metric,
             )
+
+            pause = self.pause_for(metric) if index < total else 0.0
+            if pause > 0:
+                log.info("pacing %.0fs after %s tokens", pause, metric.tokens)
+                time.sleep(pause)
 
         yield Progress(
             index=total,

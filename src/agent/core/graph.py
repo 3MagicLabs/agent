@@ -8,6 +8,7 @@ supervisor can ping-pong between specialists indefinitely.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, Literal
@@ -69,6 +70,32 @@ def trim(messages: list[BaseMessage], keep: int) -> list[BaseMessage]:
     if len(messages) <= keep:
         return list(messages)
     return [messages[0], *messages[-(keep - 1) :]]
+
+
+#: Conversational lead-ins the model emits despite being told not to. Observed:
+#: "Therefore, the answer is 5." on a task whose graded answer was "5".
+_PREAMBLE = re.compile(
+    r"^\s*(?:therefore|thus|so|hence)?[,\s]*" r"(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_answer(text: str) -> str:
+    """Strip wrapping the grader would count as a wrong answer.
+
+    Exact match makes "Therefore, the answer is 5." and "5" as different as
+    right and wrong. The prompt already forbids preamble; this is the
+    deterministic backstop for when the model does it anyway.
+
+    Only unambiguous wrapping is removed - never punctuation inside the answer,
+    so decimals and comma-separated lists survive intact.
+    """
+    cleaned = _PREAMBLE.sub("", text.strip()).strip()
+    if len(cleaned) > 1 and cleaned[0] == cleaned[-1] and cleaned[0] in "\"'":
+        cleaned = cleaned[1:-1].strip()
+    if cleaned.endswith(".") and not cleaned.endswith(".."):
+        cleaned = cleaned[:-1].strip()
+    return cleaned or text.strip()
 
 
 class Orchestrator:
@@ -152,7 +179,7 @@ class Orchestrator:
         # once emitted 4,344 tokens of a single sentence repeated.
         finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
         try:
-            content = str(finalizer.invoke(messages).content).strip()
+            content = clean_answer(str(finalizer.invoke(messages).content))
         except Exception as exc:
             log.error("Finalizer failed: %s", exc)
             raise

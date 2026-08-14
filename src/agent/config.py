@@ -69,6 +69,10 @@ class Settings:
     # --- run budgets ---
     per_question_timeout_s: float = 180.0
     total_budget_s: float = 2400.0
+    #: Provider tokens-per-minute allowance; the runner sleeps between tasks to
+    #: stay under it. 0 disables pacing. Groq's free tier reports 12000 in its
+    #: x-ratelimit-limit-tokens header.
+    tokens_per_minute: int = 12000
 
     # --- tools ---
     tavily_api_key: str = ""
@@ -155,6 +159,7 @@ def load_settings() -> Settings:
         history_window=_env_int("HISTORY_WINDOW", 8),
         per_question_timeout_s=_env_float("PER_QUESTION_TIMEOUT_S", 180.0),
         total_budget_s=_env_float("TOTAL_BUDGET_S", 2400.0),
+        tokens_per_minute=_env_int("TOKENS_PER_MINUTE", 12000),
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         e2b_api_key=os.getenv("E2B_API_KEY", ""),
         max_scrape_chars=_env_int("MAX_SCRAPE_CHARS", 6000),

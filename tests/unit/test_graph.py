@@ -10,7 +10,13 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.core.graph import Orchestrator, build_route_model, routing_prompt, trim
+from agent.core.graph import (
+    Orchestrator,
+    build_route_model,
+    clean_answer,
+    routing_prompt,
+    trim,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -135,3 +141,28 @@ class TestTrim:
         assert len(trimmed) == 4
         assert trimmed[0].content == "original"
         assert trimmed[-1].content == "19"
+
+
+class TestCleanAnswer:
+    """Exact match makes 'Therefore, the answer is 5.' and '5' as different as wrong and right."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Therefore, the answer is 5.", "5"),
+            ("The answer is Mercedes Sosa", "Mercedes Sosa"),
+            ("Final answer: 1954", "1954"),
+            ("answer: right", "right"),
+            ('"Saint Petersburg"', "Saint Petersburg"),
+            ("3", "3"),
+        ],
+    )
+    def test_strips_wrapping(self, raw, expected):
+        assert clean_answer(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["3.14", "-2.5", "a, b, c", "St. Petersburg"])
+    def test_leaves_the_answer_itself_alone(self, raw):
+        assert clean_answer(raw) == raw
+
+    def test_never_empties_an_answer(self):
+        assert clean_answer("answer is") == "answer is"
