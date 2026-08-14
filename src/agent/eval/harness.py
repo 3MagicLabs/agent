@@ -8,6 +8,7 @@ submission is a separate step — a dropped connection must never lose a run.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,17 @@ AnswerFn = Callable[..., str]
 
 #: Floor for a per-task timeout derived from a nearly exhausted total budget.
 MIN_TASK_TIMEOUT_S = 1.0
+
+#: Marker the supervisor stamps on specialist output ("[web_agent]\n..."). Seeing
+#: it in a final answer proves the finalizer never ran, so the text is
+#: intermediate output rather than an answer.
+_SPECIALIST_TAG = re.compile(r"^\[(\w+)\]")
+
+#: Generous ceiling on a graded answer. GAIA answers are a number, a short
+#: string or a comma-separated list; anything near this is runaway generation,
+#: not an answer. Deliberately far above any legitimate value so the rule stays
+#: structural - it never has to know what the task was.
+MAX_ANSWER_CHARS = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +67,27 @@ def build_prompt(item: dict[str, Any]) -> str:
     if item.get("file_url"):
         prompt += f"\n[File URL: {item['file_url']}]"
     return prompt
+
+
+def rejection_reason(answer: str) -> str:
+    """Why ``answer`` is not a usable answer, or "" when it is.
+
+    Note the inversion: an empty return means accepted. Callers treat any
+    non-empty string as both the rejection and its explanation, so it can be
+    recorded directly as ``TaskMetric.error``.
+
+    This asks only whether the agent produced an answer at all - never whether
+    it is correct. Grading lives in ``agent.eval.scorers``.
+    """
+    stripped = answer.strip()
+    if not stripped:
+        return "empty answer"
+    tag = _SPECIALIST_TAG.match(stripped)
+    if tag:
+        return f"unfinalized {tag.group(1)} output"
+    if len(stripped) > MAX_ANSWER_CHARS:
+        return f"answer too long ({len(stripped)} chars)"
+    return ""
 
 
 class AnswerCache:
@@ -108,7 +141,8 @@ class BenchmarkRunner:
         if self._answer_fn is None:
             from agent.core.graph import answer_question
 
-            self._answer_fn = answer_question
+            resolved: AnswerFn = answer_question
+            self._answer_fn = resolved
         return self._answer_fn
 
     # --- data ----------------------------------------------------------
@@ -150,6 +184,11 @@ class BenchmarkRunner:
         finally:
             # Never wait: a hung task must not block the rest of the batch.
             executor.shutdown(wait=False)
+
+        if status == "ok":
+            reason = rejection_reason(answer)
+            if reason:
+                status, error = "error", reason
 
         return TaskMetric(
             task_id=task_id,

@@ -27,6 +27,7 @@ from agent.obs.tracing import trace_config
 log = get_logger("core.graph")
 
 FINISH = "FINISH"
+FINAL_ANSWER = "final_answer"
 
 
 class RouteDecision(BaseModel):
@@ -76,9 +77,13 @@ class Orchestrator:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.specs = all_specs(self.settings)
+        self._subgraphs = {spec.name: build_specialist(spec) for spec in self.specs}
+        # The roster is fixed for the whole run. Narrowing it as specialists are
+        # used looks tempting, but with_structured_output does not constrain
+        # generation on Groq - it validates afterwards and returns a hard 400.
+        # Removing a choice the model still wants turns a retry into a failure.
         self._route_model = build_route_model(self.specs)
         self._system = SystemMessage(content=routing_prompt(self.specs))
-        self._subgraphs = {spec.name: build_specialist(spec) for spec in self.specs}
         self.graph = self._compile()
 
     # --- nodes ---------------------------------------------------------
@@ -117,16 +122,16 @@ class Orchestrator:
         subgraph = self._subgraphs[name]
 
         def node(state: SupervisorState) -> dict[str, Any]:
-            payload = {
-                "messages": trim(list(state["messages"]), 4),
-                "iterations": 0,
-                "last_error": "",
-            }
+            seeded = trim(list(state["messages"]), 4)
+            payload = {"messages": seeded, "iterations": 0, "last_error": ""}
             try:
                 result = subgraph.invoke(
                     payload, config={"recursion_limit": self.settings.recursion_limit}
                 )
-                content = last_text(result["messages"])
+                # Only what the subgraph appended. Running last_text over the whole
+                # list walks back into the seed messages, so a specialist that
+                # produced nothing echoes its own input back - double-tagged.
+                content = last_text(list(result["messages"])[len(seeded) :])
             except Exception as exc:  # noqa: BLE001 - one specialist failing is recoverable
                 log.error("%s failed: %s", name, exc)
                 content = f"{name} failed with error: {exc}"
@@ -143,14 +148,17 @@ class Orchestrator:
             SystemMessage(content=FINALIZER),
             *trim(list(state["messages"]), self.settings.history_window),
         ]
+        # Capped: the answer is a few words, and an uncapped repetition loop
+        # once emitted 4,344 tokens of a single sentence repeated.
+        finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
         try:
-            content = str(get_llm().invoke(messages).content).strip()
-        except Exception as exc:  # noqa: BLE001 - fall back to the raw last message
+            content = str(finalizer.invoke(messages).content).strip()
+        except Exception as exc:
             log.error("Finalizer failed: %s", exc)
-            content = last_text(list(state["messages"]), default="")
+            raise
 
         log.info("final answer: %s", content[:200])
-        return {"messages": [AIMessage(content=content, name="final_answer")], "steps": 0}
+        return {"messages": [AIMessage(content=content, name=FINAL_ANSWER)], "steps": 0}
 
     def _route(self, state: SupervisorState) -> str:
         target = state.get("next_agent", FINISH)
@@ -186,7 +194,10 @@ class Orchestrator:
             initial_supervisor_state([HumanMessage(content=question)]),
             config=trace_config(task_id, callbacks),
         )
-        return last_text(list(final_state["messages"]), default="")
+        for message in reversed(list(final_state["messages"])):
+            if getattr(message, "name", "") == FINAL_ANSWER:
+                return str(message.content).strip()
+        return ""
 
 
 @lru_cache(maxsize=1)

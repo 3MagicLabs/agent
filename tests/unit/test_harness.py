@@ -7,7 +7,7 @@ import time
 import pytest
 
 from agent.config import Settings, set_settings
-from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt
+from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
 
 pytestmark = pytest.mark.unit
 
@@ -155,3 +155,59 @@ class TestSubmit:
     def test_empty_cache_refuses_to_submit(self, settings):
         with pytest.raises(ValueError, match="empty"):
             make_runner(lambda *_: "x").submit("me", "code-url")
+
+
+class TestRejectionReason:
+    """The predicate alone: string in, reason out. No runner, no fixtures."""
+
+    @pytest.mark.parametrize("answer", ["", "   ", "\n\t "])
+    def test_blank_answers_are_rejected(self, answer):
+        assert rejection_reason(answer) == "empty answer"
+
+    def test_specialist_tag_means_the_finalizer_never_ran(self):
+        assert "web_agent" in rejection_reason("[web_agent]\n1954")
+
+    @pytest.mark.parametrize("answer", ["1954", "Mercedes Sosa", "3, 4, 5", "-2.5"])
+    def test_real_answers_are_accepted(self, answer):
+        assert rejection_reason(answer) == ""
+
+    def test_runaway_generation_is_rejected(self):
+        """A repetition loop once emitted 7,876 characters of one Thai sentence."""
+        assert "too long" in rejection_reason("word " * 400)
+
+    def test_a_long_but_plausible_list_is_accepted(self):
+        assert rejection_reason(", ".join(str(n) for n in range(100))) == ""
+
+
+class TestAnswerValidation:
+    """The predicate wired in: a returned string is not by itself a success.
+
+    ``run_one`` used to stamp "ok" whenever no exception escaped the worker
+    thread, so an empty or unfinalized answer was cached and submitted.
+    """
+
+    def test_empty_answer_is_recorded_as_an_error(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "").run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        assert metric.error == "empty answer"
+
+    def test_unfinalized_output_is_recorded_as_an_error(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "[web_agent]\n1954").run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        # Quarantined, not deleted: the rejected text stays readable in the metrics.
+        assert metric.answer == "[web_agent]\n1954"
+
+    def test_a_real_answer_still_passes(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "1954").run_one(QUESTIONS[0])
+
+        assert metric.status == "ok"
+        assert metric.error == ""
+
+    def test_a_rejected_answer_is_never_cached(self, settings):
+        runner = make_runner(lambda _q, _t, _c: "")
+
+        list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert runner.cache.load() == {}

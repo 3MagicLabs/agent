@@ -56,6 +56,9 @@ class Settings:
     temperature: float = 0.0
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 2
+    #: Hard ceiling on the finalizer's reply. A graded answer is a few words;
+    #: without a cap a repetition loop can emit thousands of tokens of garbage.
+    max_answer_tokens: int = 128
 
     # --- orchestration budgets ---
     max_supervisor_steps: int = 4
@@ -145,6 +148,7 @@ def load_settings() -> Settings:
         temperature=_env_float("LLM_TEMPERATURE", 0.0),
         llm_timeout_s=_env_float("LLM_TIMEOUT_S", 60.0),
         llm_max_retries=_env_int("LLM_MAX_RETRIES", 2),
+        max_answer_tokens=_env_int("MAX_ANSWER_TOKENS", 128),
         max_supervisor_steps=_env_int("MAX_SUPERVISOR_STEPS", 4),
         max_web_iterations=_env_int("MAX_WEB_ITERATIONS", 3),
         max_code_iterations=_env_int("MAX_CODE_ITERATIONS", 3),

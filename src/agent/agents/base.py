@@ -70,20 +70,27 @@ def build_specialist(
         if state.get("last_error"):
             messages.append(SystemMessage(content=f"Previous error to fix: {state['last_error']}"))
 
+        error = ""
         try:
             model = llm_factory().bind_tools(tool_list) if tool_list else llm_factory()
             response: BaseMessage = model.invoke(messages)
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s reasoning failed: %s", spec.name, exc)
+            # Recorded, not swallowed: `route` sends it back here with the error
+            # quoted, which is usually enough to fix a malformed tool call.
+            error = str(exc)
             response = AIMessage(content=f"{spec.name} failed: {exc}")
 
-        return {"messages": [response], "iterations": 1, "last_error": ""}
+        return {"messages": [response], "iterations": 1, "last_error": error}
 
     def route(state: SpecialistState) -> str:
-        """Continue to tools, or stop — including a hard stop on the budget."""
+        """Continue to tools, retry a failed call, or stop on the budget."""
         if state.get("iterations", 0) >= spec.max_iterations:
             log.warning("%s hit its iteration cap (%d) - stopping.", spec.name, spec.max_iterations)
             return END
+        if state.get("last_error"):
+            log.info("%s retrying after: %s", spec.name, state["last_error"][:120])
+            return "reason"
         if getattr(state["messages"][-1], "tool_calls", None):
             return "tools"
         return END
@@ -94,7 +101,9 @@ def build_specialist(
 
     if tool_list:
         builder.add_node("tools", ToolNode(tool_list))
-        builder.add_conditional_edges("reason", route, {"tools": "tools", END: END})
+        builder.add_conditional_edges(
+            "reason", route, {"tools": "tools", "reason": "reason", END: END}
+        )
         builder.add_edge("tools", "reason")
     else:
         builder.add_edge("reason", END)

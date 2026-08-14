@@ -53,11 +53,17 @@ class StubLLM:
         self.reply = reply
         self.route_to = route_to
         self.calls: list[list[BaseMessage]] = []
+        self.bound: dict[str, Any] = {}
 
     def with_structured_output(self, model_cls: type, **_kwargs: Any) -> StubRouter:
         return StubRouter(model_cls, self.route_to)
 
     def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
+        return self
+
+    def bind(self, **kwargs: Any) -> StubLLM:
+        """Record per-call overrides (``max_tokens``) and stay chainable."""
+        self.bound = {**self.bound, **kwargs}
         return self
 
     def invoke(self, messages: Sequence[BaseMessage]) -> AIMessage:
@@ -72,6 +78,9 @@ class FailingLLM:
         return self
 
     def bind_tools(self, *_args: Any, **_kwargs: Any) -> FailingLLM:
+        return self
+
+    def bind(self, **_kwargs: Any) -> FailingLLM:
         return self
 
     def invoke(self, *_args: Any, **_kwargs: Any) -> Any:

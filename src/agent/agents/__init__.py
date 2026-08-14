@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from agent.agents import code, web
+from agent.agents import code, reason, web
 from agent.agents.base import SpecialistSpec, build_specialist, last_text
 from agent.config import Settings, get_settings
 
 SpecBuilder = Callable[[Settings | None], SpecialistSpec]
 
-SPEC_BUILDERS: tuple[SpecBuilder, ...] = (web.spec, code.spec)
+#: Order matters only for how the roster reads to the router. Cheapest first.
+SPEC_BUILDERS: tuple[SpecBuilder, ...] = (reason.spec, web.spec, code.spec)
 
 
 def all_specs(settings: Settings | None = None) -> tuple[SpecialistSpec, ...]:
