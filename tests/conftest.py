@@ -95,6 +95,10 @@ def clean_env(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     reset_settings()
     set_settings(Settings(log_dir=tmp_path / "logs", download_dir=tmp_path / "downloads"))
+
+    from agent.tools.files import _dataset_index
+
+    _dataset_index.cache_clear()  # a listing cached under other settings must not leak
     yield
     reset_settings()
 

@@ -77,6 +77,9 @@ class Settings:
     # --- tools ---
     tavily_api_key: str = ""
     e2b_api_key: str = ""
+    #: Read independently of provider resolution: the GAIA dataset is gated,
+    #: and its files are needed even when the LLM provider is not HuggingFace.
+    hf_token: str = ""
     max_scrape_chars: int = 6000
     max_file_chars: int = 12000
     max_code_output_chars: int = 4000
@@ -177,6 +180,7 @@ def load_settings() -> Settings:
         tokens_per_minute=_env_int("TOKENS_PER_MINUTE", 12000),
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         e2b_api_key=os.getenv("E2B_API_KEY", ""),
+        hf_token=(os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or ""),
         max_scrape_chars=_env_int("MAX_SCRAPE_CHARS", 6000),
         max_file_chars=_env_int("MAX_FILE_CHARS", 12000),
         max_code_output_chars=_env_int("MAX_CODE_OUTPUT_CHARS", 4000),

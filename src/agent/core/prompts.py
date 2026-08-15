@@ -59,6 +59,10 @@ Write and run Python to solve the problem.
 - On an error, read the traceback and rewrite the code rather than retrying it verbatim.
 - If the tool reports that execution is unavailable, reason the answer out directly."""
 
+#: Sent as the final user turn so the conversation ends with a request rather
+#: than with the specialist's own answer, which the model reads as "already done".
+FINALIZER_REQUEST = "Give the final answer now, following the rules exactly."
+
 FINALIZER = """You are the Answer Formatter. Your output is graded by EXACT MATCH.
 
 Read the conversation and output ONLY the final answer: no preamble, no explanation,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 import requests
@@ -20,6 +21,11 @@ from agent.obs.logging import get_logger
 from agent.tools.registry import ToolSpec, register
 
 log = get_logger("tools.files")
+
+#: The benchmark's 20 tasks are drawn from this gated dataset; its files are the
+#: only working source while the scoring API's /files route 404s.
+GAIA_DATASET = "gaia-benchmark/GAIA"
+GAIA_SPLIT = "2023/validation"
 
 TEXT_SUFFIXES = frozenset(
     {".txt", ".md", ".py", ".json", ".jsonl", ".xml", ".html", ".csv", ".tsv"}
@@ -51,6 +57,73 @@ def _resolve(path: str) -> Path | None:
     return candidate
 
 
+def _from_scoring_api(task_id: str) -> tuple[bytes, str] | None:
+    """Attachment bytes and suffix from the benchmark's own endpoint."""
+    settings = get_settings()
+    url = f"{settings.scoring_api_url}/files/{task_id}"
+    try:
+        response = requests.get(url, timeout=settings.scrape_timeout_s)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - a miss here is expected; we fall back
+        log.info("scoring API has no file for %s (%s)", task_id, exc)
+        return None
+
+    suffix = ""
+    disposition = response.headers.get("content-disposition", "")
+    if "filename=" in disposition:
+        suffix = Path(disposition.split("filename=")[-1].strip('"; ')).suffix
+    return response.content, suffix
+
+
+@lru_cache(maxsize=1)
+def _dataset_index() -> dict[str, str]:
+    """task_id -> path within the GAIA dataset, or empty when unreachable.
+
+    Cached: one listing serves every task in a run.
+    """
+    settings = get_settings()
+    if not settings.hf_token:
+        return {}
+
+    url = f"https://huggingface.co/api/datasets/{GAIA_DATASET}/tree/main/{GAIA_SPLIT}"
+    try:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {settings.hf_token}"},
+            timeout=settings.scrape_timeout_s,
+        )
+        response.raise_for_status()
+        entries = response.json()
+    except Exception as exc:  # noqa: BLE001 - degrade to "no attachments available"
+        log.warning("GAIA dataset listing unavailable: %s", exc)
+        return {}
+
+    index = {Path(str(e.get("path", ""))).stem: str(e.get("path", "")) for e in entries}
+    log.info("GAIA dataset index: %d attachments", len(index))
+    return index
+
+
+def _from_dataset(task_id: str) -> tuple[bytes, str] | None:
+    """Attachment bytes and suffix from the gated GAIA dataset on the Hub."""
+    path = _dataset_index().get(task_id)
+    if not path:
+        return None
+
+    settings = get_settings()
+    url = f"https://huggingface.co/datasets/{GAIA_DATASET}/resolve/main/{path}"
+    try:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {settings.hf_token}"},
+            timeout=settings.scrape_timeout_s,
+        )
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
+        log.error("dataset fetch failed for %s: %s", task_id, exc)
+        return None
+    return response.content, Path(path).suffix
+
+
 @tool
 def download_task_file(task_id: str) -> str:
     """
@@ -58,26 +131,23 @@ def download_task_file(task_id: str) -> str:
     Call this first whenever the question mentions an attached file.
     Returns the local path, which you then pass to read_file.
     """
-    settings = get_settings()
-    url = f"{settings.scoring_api_url}/files/{task_id}"
-    log.info("download_task_file: %s", url)
+    log.info("download_task_file: %s", task_id)
+    # The scoring API is authoritative but currently returns 404 for every
+    # attachment task ("No file path associated with task_id"), so the gated
+    # GAIA dataset is the working source. Order kept in case it is restored.
+    payload = _from_scoring_api(task_id) or _from_dataset(task_id)
+    if payload is None:
+        return (
+            f"No file is available for task {task_id}. The scoring API has no mapping "
+            f"for it, and the GAIA dataset is unreachable - that needs HF_TOKEN set and "
+            f"the dataset terms accepted at huggingface.co/datasets/gaia-benchmark/GAIA."
+        )
 
-    try:
-        response = requests.get(url, timeout=settings.scrape_timeout_s)
-        response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
-        log.error("download failed for %s: %s", task_id, exc)
-        return f"Could not download the file for task {task_id}: {exc}"
-
-    suffix = ""
-    disposition = response.headers.get("content-disposition", "")
-    if "filename=" in disposition:
-        suffix = Path(disposition.split("filename=")[-1].strip('"; ')).suffix
-
+    content, suffix = payload
     destination = _download_dir() / f"{task_id}{suffix}"
-    destination.write_bytes(response.content)
-    log.info("saved %d bytes -> %s", len(response.content), destination)
-    return f"Downloaded to {destination} ({len(response.content)} bytes). Now call read_file on it."
+    destination.write_bytes(content)
+    log.info("saved %d bytes -> %s", len(content), destination)
+    return f"Downloaded to {destination} ({len(content)} bytes). Now call read_file on it."
 
 
 def _read_tabular(path: Path, limit: int) -> str:

@@ -166,3 +166,18 @@ class TestCleanAnswer:
 
     def test_never_empties_an_answer(self):
         assert clean_answer("answer is") == "answer is"
+
+
+def test_the_finalizer_prompt_ends_with_a_user_turn(settings, stub_llm):
+    """Ending on the specialist's AIMessage makes the model emit a stop token.
+
+    Measured: a specialist reply closing with its own "Answer: ..." block
+    produced completion_tokens=1 and empty content 3 times out of 3. Adding a
+    trailing request produced the correct answer 3 times out of 3.
+    """
+    llm = stub_llm(reply="right", route_to="FINISH")
+
+    Orchestrator(settings).answer("which are vegetables?", task_id="t5")
+
+    final_call = llm.calls[-1]
+    assert isinstance(final_call[-1], HumanMessage)

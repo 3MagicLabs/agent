@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, create_model
 from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text
 from agent.config import Settings, get_settings
 from agent.core.llm import get_llm
-from agent.core.prompts import FINALIZER, SUPERVISOR
+from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
@@ -171,9 +171,15 @@ class Orchestrator:
         return node
 
     def _finalize(self, state: SupervisorState) -> dict[str, Any]:
+        # The trailing user turn is load-bearing. Specialist output is an
+        # AIMessage, and when it happens to end with its own "Answer: ..."
+        # block the model reads the conversation as already complete and
+        # returns a single stop token - measured 3/3 empty without this line
+        # and 3/3 correct with it, on the same captured conversation.
         messages = [
             SystemMessage(content=FINALIZER),
             *trim(list(state["messages"]), self.settings.history_window),
+            HumanMessage(content=FINALIZER_REQUEST),
         ]
         # Capped: the answer is a few words, and an uncapped repetition loop
         # once emitted 4,344 tokens of a single sentence repeated.

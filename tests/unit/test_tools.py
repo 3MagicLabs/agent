@@ -64,6 +64,7 @@ class TestFiles:
         assert "print('hi')" in read_file.invoke({"path": "notes.py"})
 
     def test_download_failure_is_reported_not_raised(self, settings, monkeypatch):
+        """Every source unreachable must return a message, never raise."""
         import agent.tools.files as files_module
 
         def boom(*_args, **_kwargs):
@@ -72,7 +73,29 @@ class TestFiles:
         monkeypatch.setattr(files_module.requests, "get", boom)
         result = download_task_file.invoke({"task_id": "abc"})
 
-        assert "Could not download" in result
+        assert "No file is available" in result
+        assert "gaia-benchmark/GAIA" in result
+
+    def test_falls_back_to_the_dataset_when_the_scoring_api_has_no_file(
+        self, settings, monkeypatch, tmp_path
+    ):
+        """The scoring API returns 404 for all five attachment tasks."""
+        import agent.tools.files as files_module
+
+        monkeypatch.setattr(files_module, "_from_scoring_api", lambda _t: None)
+        monkeypatch.setattr(files_module, "_from_dataset", lambda _t: (b"col\n1\n", ".csv"))
+
+        result = download_task_file.invoke({"task_id": "abc"})
+
+        assert "Downloaded to" in result
+        assert (settings.download_dir / "abc.csv").read_bytes() == b"col\n1\n"
+
+    def test_the_dataset_is_skipped_without_a_token(self, settings, monkeypatch):
+        """No HF_TOKEN must degrade quietly rather than hitting a 401 per task."""
+        import agent.tools.files as files_module
+
+        files_module._dataset_index.cache_clear()
+        assert files_module._dataset_index() == {}
 
 
 class TestRegistry:
