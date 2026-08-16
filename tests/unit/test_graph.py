@@ -7,6 +7,8 @@ shut.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -181,3 +183,29 @@ def test_the_finalizer_prompt_ends_with_a_user_turn(settings, stub_llm):
 
     final_call = llm.calls[-1]
     assert isinstance(final_call[-1], HumanMessage)
+
+
+def test_a_specialist_is_told_what_is_already_downloaded(settings):
+    """Pushed, not pulled: list_downloaded_files was called 0 times in 92 downloads.
+
+    A specialist gets a fresh state per delegation, so without this it re-fetches
+    what an earlier delegation already had - one task downloaded the same
+    spreadsheet four times.
+    """
+    settings.download_dir.mkdir(parents=True, exist_ok=True)
+    (settings.download_dir / "sales.xlsx").write_bytes(b"12345")
+
+    orchestrator = Orchestrator(settings)
+    seen: dict[str, Any] = {}
+
+    class RecordingSubgraph:
+        def invoke(self, payload, config=None):
+            seen["messages"] = payload["messages"]
+            return {"messages": [*payload["messages"], AIMessage(content="42")]}
+
+    orchestrator._subgraphs["web_agent"] = RecordingSubgraph()
+    orchestrator._make_specialist_node("web_agent")(
+        {"messages": [HumanMessage(content="total sales?")]}
+    )
+
+    assert any("sales.xlsx" in str(m.content) for m in seen["messages"])

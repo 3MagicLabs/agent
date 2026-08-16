@@ -139,3 +139,39 @@ class TestWikipedia:
         monkeypatch.setattr(web_module.requests, "get", boom)
 
         assert "failed" in wikipedia_lookup.invoke({"title": "Mars"}).lower()
+
+
+class TestDownloadMemoisation:
+    """One task fetched the same spreadsheet four times: 83s and a rate limit."""
+
+    def test_an_existing_file_is_not_refetched(self, settings, monkeypatch):
+        import agent.tools.files as files_module
+
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "abc.xlsx").write_bytes(b"already here")
+
+        def explode(*_a, **_kw):
+            raise AssertionError("network hit despite a cached file")
+
+        monkeypatch.setattr(files_module.requests, "get", explode)
+        result = download_task_file.invoke({"task_id": "abc"})
+
+        assert "Already downloaded" in result
+        assert "abc.xlsx" in result
+
+    def test_inventory_is_empty_before_any_download(self, settings):
+        from agent.tools.files import downloaded_inventory
+
+        assert downloaded_inventory() == ""
+
+    def test_inventory_lists_files_with_sizes(self, settings):
+        from agent.tools.files import downloaded_inventory
+
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "data.xlsx").write_bytes(b"12345")
+
+        line = downloaded_inventory()
+
+        assert "data.xlsx" in line
+        assert "5 bytes" in line
+        assert "read_file" in line

@@ -24,6 +24,7 @@ from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
+from agent.tools.files import downloaded_inventory
 
 log = get_logger("core.graph")
 
@@ -150,6 +151,12 @@ class Orchestrator:
 
         def node(state: SupervisorState) -> dict[str, Any]:
             seeded = trim(list(state["messages"]), 4)
+            # A specialist gets a fresh state on every delegation, so it has no
+            # memory of work it already did. Pushing the inventory is what stops
+            # the second delegation re-fetching what the first one downloaded.
+            inventory = downloaded_inventory()
+            if inventory:
+                seeded = [*seeded, SystemMessage(content=inventory)]
             payload = {"messages": seeded, "iterations": 0, "last_error": ""}
             try:
                 result = subgraph.invoke(

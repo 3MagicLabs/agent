@@ -42,6 +42,11 @@ _SPECIALIST_TAG = re.compile(r"^\[(\w+)\]")
 #: structural - it never has to know what the task was.
 MAX_ANSWER_CHARS = 1000
 
+#: Named in the attachment prompt because the model does not reliably infer them
+#: from tool docstrings alone. Guarded by a test that they remain registered.
+DOWNLOAD_TOOL = "download_task_file"
+READ_TOOL = "read_file"
+
 
 @dataclass(frozen=True, slots=True)
 class Progress:
@@ -59,10 +64,15 @@ def build_prompt(item: dict[str, Any]) -> str:
     prompt = str(item.get("question", ""))
     task_id = item.get("task_id", "")
     if item.get("file_name"):
+        # Naming the tools explicitly is load-bearing, not redundant. Stating
+        # only that a file exists and leaving the model to infer the tools from
+        # their docstrings was measured: the xlsx task stopped fetching its file
+        # and went from 17949.59 to 0.00. The coupling this creates is guarded by
+        # test_the_named_tools_exist, which fails loudly if either is renamed.
         prompt += (
             f"\n\n[This task has an attached file: {item['file_name']}. "
-            f"Call download_task_file with task_id='{task_id}' to retrieve it, "
-            f"then read_file on the returned path.]"
+            f"Call {DOWNLOAD_TOOL} with task_id='{task_id}' to retrieve it, "
+            f"then {READ_TOOL} on the returned path.]"
         )
     if item.get("file_url"):
         prompt += f"\n[File URL: {item['file_url']}]"

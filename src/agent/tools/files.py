@@ -27,6 +27,9 @@ log = get_logger("tools.files")
 GAIA_DATASET = "gaia-benchmark/GAIA"
 GAIA_SPLIT = "2023/validation"
 
+#: Named in the pushed inventory line so the model knows what to do with it.
+READ_TOOL_NAME = "read_file"
+
 TEXT_SUFFIXES = frozenset(
     {".txt", ".md", ".py", ".json", ".jsonl", ".xml", ".html", ".csv", ".tsv"}
 )
@@ -55,6 +58,33 @@ def _resolve(path: str) -> Path | None:
     if candidate.parent != root or not candidate.exists():
         return None
     return candidate
+
+
+def _existing_download(task_id: str) -> Path | None:
+    """A previously fetched attachment for this task, if any."""
+    try:
+        matches = sorted(p for p in _download_dir().glob(f"{task_id}*") if p.is_file())
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
+def downloaded_inventory() -> str:
+    """Attachments already fetched, as a line to push into a specialist's context.
+
+    Pushed rather than left to ``list_downloaded_files``: that tool has been
+    bound to every file-capable specialist from the start and called zero times
+    across 92 downloads. A tool the model must choose to call cannot fix a
+    failure caused by the model not choosing to call things.
+    """
+    try:
+        entries = sorted(p for p in _download_dir().iterdir() if p.is_file())
+    except OSError:
+        return ""
+    if not entries:
+        return ""
+    listing = ", ".join(f"{p.name} ({p.stat().st_size} bytes)" for p in entries)
+    return f"Files already downloaded and ready for {READ_TOOL_NAME}: {listing}"
 
 
 def _from_scoring_api(task_id: str) -> tuple[bytes, str] | None:
@@ -132,6 +162,16 @@ def download_task_file(task_id: str) -> str:
     Returns the local path, which you then pass to read_file.
     """
     log.info("download_task_file: %s", task_id)
+
+    # Memoised on disk. The supervisor re-delegates freely and each delegation
+    # gives the specialist a fresh state, so one task fetched the same
+    # spreadsheet four times - 83 seconds and a rate limit for one file.
+    cached = _existing_download(task_id)
+    if cached is not None:
+        size = cached.stat().st_size
+        log.info("already downloaded: %s", cached)
+        return f"Already downloaded to {cached} ({size} bytes). Now call read_file on it."
+
     # The scoring API is authoritative but currently returns 404 for every
     # attachment task ("No file path associated with task_id"), so the gated
     # GAIA dataset is the working source. Order kept in case it is restored.

@@ -26,12 +26,33 @@ class TestBuildPrompt:
     def test_plain_question_is_unchanged(self):
         assert build_prompt({"task_id": "t", "question": "hi"}) == "hi"
 
-    def test_attachment_instructs_the_download_tool(self):
+    def test_attachment_is_flagged_with_its_name_and_id(self):
         prompt = build_prompt({"task_id": "abc", "question": "sum it", "file_name": "data.xlsx"})
 
         assert "data.xlsx" in prompt
-        assert "download_task_file" in prompt
-        assert "task_id='abc'" in prompt
+        assert "abc" in prompt
+
+    def test_the_named_tools_exist(self):
+        """The prompt names tools, so a rename must break a test, not a run.
+
+        Dropping the names entirely was tried and measured: the xlsx task
+        stopped fetching its attachment and answered 0.00 instead of 17949.59.
+        The instruction stays; this guards the coupling it creates.
+        """
+        from agent.eval.harness import DOWNLOAD_TOOL, READ_TOOL
+        from agent.tools import registered
+
+        names = {spec.name for spec in registered()}
+
+        assert {DOWNLOAD_TOOL, READ_TOOL} <= names
+
+    def test_the_prompt_uses_the_registered_names(self):
+        from agent.eval.harness import DOWNLOAD_TOOL, READ_TOOL
+
+        prompt = build_prompt({"task_id": "abc", "question": "sum it", "file_name": "data.xlsx"})
+
+        assert DOWNLOAD_TOOL in prompt
+        assert READ_TOOL in prompt
 
 
 class TestRun:
