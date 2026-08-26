@@ -7,6 +7,7 @@ import time
 import pytest
 
 from agent.config import Settings, set_settings
+from agent.core.prompts import FINALIZER, NO_ANSWER
 from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
 from agent.obs.metrics import TaskMetric
 
@@ -259,3 +260,27 @@ class TestPacing:
     def test_unmeasured_tokens_do_not_stall_the_run(self, tmp_path):
         set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
         assert make_runner(None).pause_for(self._metric(0, 1.0)) == 0.0
+
+
+class TestNoAnswerSentinel:
+    """The finalizer needs a legal way to fail.
+
+    Without one it was instructed to guess, and a fluent guess passes every
+    shape check - it differs from a real answer only in provenance, which
+    rejection_reason cannot see.
+    """
+
+    def test_the_sentinel_is_rejected(self):
+        assert rejection_reason(NO_ANSWER) == "no answer found"
+
+    def test_surrounding_whitespace_does_not_smuggle_it_through(self):
+        assert rejection_reason(f"  {NO_ANSWER}\n") == "no answer found"
+
+    def test_an_answer_that_merely_mentions_it_is_still_accepted(self):
+        """Only the bare sentinel means failure; the word may appear in prose."""
+        assert rejection_reason(f"the file contained {NO_ANSWER}") == ""
+
+    def test_the_prompt_asks_for_the_sentinel_rather_than_a_guess(self):
+        """Guard against the 'give your single best guess anyway' line returning."""
+        assert NO_ANSWER in FINALIZER
+        assert "best guess" not in FINALIZER.lower()

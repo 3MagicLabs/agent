@@ -67,6 +67,11 @@ FINALIZER_REQUEST = "Give the final answer now, following the rules exactly."
 #: AIMessage, which Anthropic rejects outright as an assistant prefill.
 ROUTER_REQUEST = "Choose the next specialist, or FINISH if the answer is already above."
 
+#: What the finalizer emits when the transcript contains no answer. A
+#: distinguished value, not an empty string and not a guess: the harness can
+#: recognise it, and the run records a failure instead of a fabrication.
+NO_ANSWER = "NO_ANSWER"
+
 FINALIZER = """You are the Answer Formatter. Your output is graded by EXACT MATCH.
 
 Read the conversation and output ONLY the final answer: no preamble, no explanation,
@@ -77,4 +82,7 @@ Rules:
 - A string: as few words as possible, no leading article, digits written as digits.
 - A comma-separated list: apply the rules above to each element, joined by ", ".
 
-If the conversation does not contain the answer, give your single best guess anyway."""
+If the conversation does not contain the answer - because no specialist found
+it, or every attempt failed - output exactly NO_ANSWER and nothing else. Do not
+guess. A guess is scored identically to a wrong answer but is indistinguishable
+from a real one afterwards, which makes the run impossible to learn from."""

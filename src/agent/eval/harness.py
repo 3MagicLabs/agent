@@ -20,6 +20,7 @@ from typing import Any
 import requests
 
 from agent.config import Settings, get_settings
+from agent.core.prompts import NO_ANSWER
 from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
@@ -92,6 +93,12 @@ def rejection_reason(answer: str) -> str:
     stripped = answer.strip()
     if not stripped:
         return "empty answer"
+    if stripped == NO_ANSWER:
+        # The finalizer's way of saying it had nothing to work from. Without a
+        # legal way to fail it was instructed to guess instead, and a fluent
+        # guess passes every check below - it is only distinguishable from a
+        # real answer by provenance, which a shape check cannot see.
+        return "no answer found"
     tag = _SPECIALIST_TAG.match(stripped)
     if tag:
         return f"unfinalized {tag.group(1)} output"
