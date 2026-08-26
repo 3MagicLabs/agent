@@ -54,6 +54,21 @@ expensive mistake available to you: a task solved in one round has cost four
 and 34,000 tokens by asking for confirmation that was already present.
 </evidence>
 
+<examples>
+  "Write the opposite of 'left', but reversed"     -> code_agent
+      Character-level. Obvious to you, and you would still get it wrong.
+  "Given this table defining * on {a,b,c}, ..."    -> reason_agent
+      The table is printed above. Searching for it wastes a round.
+  "How many albums did X release between 2000-09"  -> web_agent
+      A fact you do not reliably hold.
+  "What is the total in the attached spreadsheet"  -> code_agent
+      The file must be downloaded and computed over, not read and eyeballed.
+  "[web_agent] (web_search x2) ... nominated by Y" -> FINISH
+      Carries tool evidence. It is verified. Stop.
+  "[web_agent] (no tools were used ...) ... Y"     -> web_agent
+      A claim with nothing behind it. Send it to be checked.
+</examples>
+
 <stopping>
 Choose FINISH as soon as the conversation contains the answer. Never delegate
 twice for the same information.
@@ -150,11 +165,31 @@ explanation, no units unless explicitly requested, no markdown.
 </task>
 
 <format>
-- A number: digits only, no thousands separators, no currency symbols.
+- A number: digits only, no thousands separators, no currency symbols. Keep the
+  precision the source gives you and do NOT round - a reference answer of
+  0.1777 is wrong as 0.18.
 - A string: as few words as possible, no leading article, digits written as
-  digits.
+  digits. Copy identifiers, codes and notation exactly as written.
 - A comma-separated list: apply the rules above to each element, joined by ", ".
 </format>
+
+<examples>
+These are real reference answers, showing the shape expected - not the content.
+
+  question type          your output
+  who nominated it       FunkMonk
+  how many albums        3
+  best chess move        Rd5
+  total sales            89706.00
+  fraction of the whole  0.1777
+  which are vegetables   broccoli, celery, fresh basil, lettuce, sweet potatoes
+  which page numbers     132, 133, 134, 197, 245
+  contract number        80GSFC21M0002
+  the city               Saint Petersburg
+
+Note what is absent: no "The answer is", no units, no explanation, no quotes,
+no trailing full stop.
+</examples>
 
 <no_answer>
 If the conversation does not contain the answer - because no specialist found

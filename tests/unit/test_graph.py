@@ -279,3 +279,34 @@ class TestPromptInvariants:
             opened = re.findall(r"<([a-z_]+)>", prompt)
             closed = re.findall(r"</([a-z_]+)>", prompt)
             assert sorted(opened) == sorted(closed), prompt[:40]
+
+
+class TestPromptExamples:
+    """Examples drawn from real reference answers, not invented ones."""
+
+    def test_the_finalizer_forbids_rounding(self):
+        """A reference answer of 0.1777 is wrong as 0.18 - a correctness rule,
+        not a formatting one, and the format rules alone did not cover it."""
+        assert "do NOT round" in _flat(FINALIZER)
+        assert "0.1777" in FINALIZER
+
+    def test_the_finalizer_shows_each_answer_shape(self):
+        """words, integer, decimal, list and identifier all occur in the gold set."""
+        for shape in ("FunkMonk", "89706.00", "132, 133, 134", "80GSFC21M0002"):
+            assert shape in FINALIZER, shape
+
+    def test_the_finalizer_names_what_must_be_absent(self):
+        assert "no units, no explanation" in _flat(FINALIZER)
+
+    def test_the_router_examples_cover_every_destination(self):
+        examples = _flat(SUPERVISOR).split("<examples>")[1]
+
+        for destination in ("code_agent", "reason_agent", "web_agent", "FINISH"):
+            assert destination in examples, destination
+
+    def test_the_router_examples_show_both_evidence_cases(self):
+        """The provenance prefix is only useful if it changes a decision."""
+        examples = _flat(SUPERVISOR).split("<examples>")[1]
+
+        assert "web_search x2" in examples
+        assert "no tools were used" in examples
