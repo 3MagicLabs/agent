@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
 from agent.config import Settings, set_settings
 from agent.core.graph import Solution
 from agent.core.prompts import FINALIZER, NO_ANSWER
+from agent.eval import harness
 from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
 from agent.obs.metrics import TaskMetric
 
@@ -319,3 +321,53 @@ class TestSupervisorSteps:
 
         assert metric.status == "error"
         assert metric.supervisor_steps == 0
+
+
+class TestSpendCeilings:
+    """A paid provider has no involuntary cap; this is the only one."""
+
+    def _costly(self, tokens: int):
+        """An answer function whose usage the recorder will price."""
+        return lambda _q, _t, _c: Solution(text="x", steps=1)
+
+    def test_a_run_stops_when_the_total_ceiling_is_reached(self, settings, monkeypatch):
+        capped = replace(settings, max_run_cost_usd=0.01, max_task_cost_usd=0.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.02)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].done
+        assert "at the $0.01 ceiling" in events[-1].message
+        assert "still submittable" in events[-1].message
+
+    def test_one_runaway_task_stops_the_run_on_its_own(self, settings, monkeypatch):
+        """A per-run ceiling alone would let a single expensive task through."""
+        capped = replace(settings, max_run_cost_usd=1000.0, max_task_cost_usd=0.01)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.02)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].done
+        assert "per-task ceiling" in events[-1].message
+
+    def test_an_affordable_run_is_untouched(self, settings, monkeypatch):
+        capped = replace(settings, max_run_cost_usd=100.0, max_task_cost_usd=1.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.001)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].message.startswith("Run complete")
+
+    def test_zero_ceilings_disable_accounting(self, settings, monkeypatch):
+        free = replace(settings, max_run_cost_usd=0.0, max_task_cost_usd=0.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=free)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 999.0)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        # Asserting on structure, not on a substring of a message that
+        # embeds a tmp_path named after this very test.
+        assert events[-1].message.startswith("Run complete")

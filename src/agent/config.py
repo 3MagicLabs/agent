@@ -61,6 +61,11 @@ class Settings:
     #: Hard ceiling on the finalizer's reply. A graded answer is a few words;
     #: without a cap a repetition loop can emit thousands of tokens of garbage.
     max_answer_tokens: int = 128
+    #: Ceiling on the router's reply. It emits one schema selection plus a
+    #: short justification; generous because Sonnet 5 spends output tokens on
+    #: adaptive thinking, and a cap that truncates mid-thought yields a
+    #: malformed structured output rather than a cheaper one.
+    max_router_tokens: int = 512
     #: Ceiling for any call that does not bind its own. Anthropic requires
     #: max_tokens at construction, so this is the client-wide default and the
     #: finalizer narrows it per call. It must fit a specialist's reasoning plus
@@ -80,6 +85,13 @@ class Settings:
     #: stay under it. 0 disables pacing. Groq's free tier reports 12000 in its
     #: x-ratelimit-limit-tokens header.
     tokens_per_minute: int = 12000
+    #: Dollar ceilings. The free provider had an involuntary daily token cap;
+    #: a paid one has none, so this is the only thing standing between a
+    #: retry loop and real money. 0 disables a ceiling.
+    #: Two of them because they catch different failures: per-task catches
+    #: one runaway, per-run catches many slightly-too-expensive ones.
+    max_task_cost_usd: float = 0.50
+    max_run_cost_usd: float = 5.00
 
     # --- tools ---
     tavily_api_key: str = ""
@@ -185,6 +197,7 @@ def load_settings() -> Settings:
         llm_timeout_s=_env_float("LLM_TIMEOUT_S", _DEFAULTS.llm_timeout_s),
         llm_max_retries=_env_int("LLM_MAX_RETRIES", _DEFAULTS.llm_max_retries),
         max_answer_tokens=_env_int("MAX_ANSWER_TOKENS", _DEFAULTS.max_answer_tokens),
+        max_router_tokens=_env_int("MAX_ROUTER_TOKENS", _DEFAULTS.max_router_tokens),
         max_supervisor_steps=_env_int("MAX_SUPERVISOR_STEPS", _DEFAULTS.max_supervisor_steps),
         max_web_iterations=_env_int("MAX_WEB_ITERATIONS", _DEFAULTS.max_web_iterations),
         max_code_iterations=_env_int("MAX_CODE_ITERATIONS", _DEFAULTS.max_code_iterations),
@@ -194,6 +207,8 @@ def load_settings() -> Settings:
         ),
         total_budget_s=_env_float("TOTAL_BUDGET_S", _DEFAULTS.total_budget_s),
         tokens_per_minute=_env_int("TOKENS_PER_MINUTE", _DEFAULTS.tokens_per_minute),
+        max_task_cost_usd=_env_float("MAX_TASK_COST_USD", _DEFAULTS.max_task_cost_usd),
+        max_run_cost_usd=_env_float("MAX_RUN_COST_USD", _DEFAULTS.max_run_cost_usd),
         tavily_api_key=os.getenv("TAVILY_API_KEY", _DEFAULTS.tavily_api_key),
         e2b_api_key=os.getenv("E2B_API_KEY", _DEFAULTS.e2b_api_key),
         hf_token=(os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or ""),

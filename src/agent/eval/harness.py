@@ -21,6 +21,7 @@ import requests
 
 from agent.config import Settings, get_settings
 from agent.core.prompts import NO_ANSWER
+from agent.obs.budget import Budget, cost_of
 from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
@@ -261,6 +262,10 @@ class BenchmarkRunner:
         answers = self.cache.load() if reuse_cache else {}
         started = time.monotonic()
         total = len(items)
+        budget = Budget(
+            max_run_usd=self.settings.max_run_cost_usd,
+            max_task_usd=self.settings.max_task_cost_usd,
+        )
 
         for index, item in enumerate(items, start=1):
             task_id = str(item.get("task_id", ""))
@@ -294,6 +299,26 @@ class BenchmarkRunner:
             if metric.status == "ok":
                 answers = {**answers, task_id: metric.answer}
                 self.cache.save(answers)
+
+            # Charged after the fact rather than estimated before it. A single
+            # task is already bounded by its timeout, so the job here is to
+            # stop the *next* one - and stopping is the point: a spent budget
+            # must never quietly become a cheaper, worse run.
+            spend = cost_of(metric.tokens, metric.model)
+            budget = budget.charge(spend)
+            reason = budget.task_overspend(spend) or budget.run_overspend()
+            if budget.enabled and reason:
+                yield Progress(
+                    index=index,
+                    total=total,
+                    message=(
+                        f"Stopped after {index}/{total}: {reason}. "
+                        f"Cached answers are still submittable."
+                    ),
+                    metric=metric,
+                    done=True,
+                )
+                return
 
             yield Progress(
                 index=index,

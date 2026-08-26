@@ -144,7 +144,10 @@ class Orchestrator:
             ROUTER_REQUEST,
         )
         try:
-            router = get_llm().with_structured_output(self._route_model, method="function_calling")
+            # Capped like the finalizer: the router emits one schema selection
+            # and a short justification, so it never needs a specialist's room.
+            router = get_llm().bind(max_tokens=self.settings.max_router_tokens)
+            router = router.with_structured_output(self._route_model, method="function_calling")
             # Typed Any deliberately. with_structured_output declares a
             # non-Optional return, which would make the None check below
             # unreachable - but that is a promise about a well-behaved provider,
