@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from agent.agents import code, reason, web
-from agent.agents.base import SpecialistSpec, build_specialist, last_text
+from agent.agents.base import SpecialistSpec, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
 
 SpecBuilder = Callable[[Settings | None], SpecialistSpec]
@@ -30,4 +30,5 @@ __all__ = [
     "all_specs",
     "build_specialist",
     "last_text",
+    "tool_evidence",
 ]

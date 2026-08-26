@@ -17,10 +17,11 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, create_model
 
-from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text
+from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
+from agent.core.conversation import normalize, text_of
 from agent.core.llm import get_llm
-from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, SUPERVISOR
+from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
@@ -123,10 +124,18 @@ class Orchestrator:
             log.warning("Supervisor step budget (%d) exhausted - finishing.", budget)
             return {"next_agent": FINISH, "steps": 1}
 
-        messages = [self._system, *trim(list(state["messages"]), self.settings.history_window)]
+        messages = normalize(
+            [self._system, *trim(list(state["messages"]), self.settings.history_window)],
+            ROUTER_REQUEST,
+        )
         try:
             router = get_llm().with_structured_output(self._route_model, method="function_calling")
-            decision = router.invoke(messages)
+            # Typed Any deliberately. with_structured_output declares a
+            # non-Optional return, which would make the None check below
+            # unreachable - but that is a promise about a well-behaved provider,
+            # and this codebase exists because providers return things their
+            # type signatures did not predict.
+            decision: Any = router.invoke(messages)
         except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
             log.error("Routing failed (%s) - finishing with what we have.", exc)
             return {"next_agent": FINISH, "steps": 1}
@@ -136,14 +145,9 @@ class Orchestrator:
             return {"next_agent": FINISH, "steps": 1}
 
         target = str(getattr(decision, "next_agent", FINISH))
-        log.info(
-            "step %d/%d -> %s (%s)",
-            step + 1,
-            budget,
-            target,
-            getattr(decision, "reasoning", ""),
-        )
-        return {"next_agent": target, "steps": 1}
+        instruction = str(getattr(decision, "reasoning", ""))
+        log.info("step %d/%d -> %s (%s)", step + 1, budget, target, instruction)
+        return {"next_agent": target, "instruction": instruction, "steps": 1}
 
     def _make_specialist_node(self, name: str) -> Callable[[SupervisorState], dict[str, Any]]:
         """Wrap a specialist subgraph as a supervisor node."""
@@ -157,6 +161,12 @@ class Orchestrator:
             inventory = downloaded_inventory()
             if inventory:
                 seeded = [*seeded, SystemMessage(content=inventory)]
+            # The router already generated a justification for this delegation
+            # and we already paid for it; it used to be logged and discarded,
+            # leaving the specialist to infer its task from the raw transcript.
+            instruction = state.get("instruction", "").strip()
+            if instruction:
+                seeded = [*seeded, HumanMessage(content=f"Your task: {instruction}")]
             payload = {"messages": seeded, "iterations": 0, "last_error": ""}
             try:
                 result = subgraph.invoke(
@@ -165,13 +175,16 @@ class Orchestrator:
                 # Only what the subgraph appended. Running last_text over the whole
                 # list walks back into the seed messages, so a specialist that
                 # produced nothing echoes its own input back - double-tagged.
-                content = last_text(list(result["messages"])[len(seeded) :])
+                appended = list(result["messages"])[len(seeded) :]
+                content = last_text(appended)
+                evidence = tool_evidence(appended)
             except Exception as exc:  # noqa: BLE001 - one specialist failing is recoverable
                 log.error("%s failed: %s", name, exc)
                 content = f"{name} failed with error: {exc}"
+                evidence = "the specialist failed before producing evidence"
 
             return {
-                "messages": [AIMessage(content=f"[{name}]\n{content}", name=name)],
+                "messages": [AIMessage(content=f"[{name}] ({evidence})\n{content}", name=name)],
                 "steps": 0,
             }
 
@@ -192,7 +205,10 @@ class Orchestrator:
         # once emitted 4,344 tokens of a single sentence repeated.
         finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
         try:
-            content = clean_answer(str(finalizer.invoke(messages).content))
+            # text_of, not str(...content): with thinking enabled the content is
+            # a list of typed blocks, and str() over it yields the repr - which
+            # once shipped `[{'signature': 'EsEECpAB...` as a final answer.
+            content = clean_answer(text_of(finalizer.invoke(normalize(messages))))
         except Exception as exc:
             log.error("Finalizer failed: %s", exc)
             raise

@@ -8,15 +8,23 @@ specialist is declared as data in ``SpecialistSpec``.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from agent.core.conversation import normalize, text_of
 from agent.core.llm import get_llm
 from agent.core.state import SpecialistState
 from agent.obs.logging import get_logger
@@ -39,6 +47,29 @@ class SpecialistSpec:
         return self.name
 
 
+def tool_evidence(messages: Sequence[BaseMessage]) -> str:
+    """Which tools actually ran, as one line the supervisor can read.
+
+    The supervisor sees only a specialist's final text, so a researched answer
+    and an invented one are indistinguishable to it. Faced with that it does the
+    only sensible thing - delegates again to verify - which is how one solved
+    task became four rounds and 34,185 tokens, its router noting each time that
+    the claim "wasn't confirmed with a search" while eight searches sat in the
+    log.
+
+    ``ToolMessage`` is the evidence rather than ``AIMessage.tool_calls``: a call
+    can be requested and still never run.
+    """
+    counts = Counter(
+        str(message.name or "unknown") for message in messages if isinstance(message, ToolMessage)
+    )
+    if not counts:
+        return "no tools were used - this answer is unverified"
+    return ", ".join(
+        f"{name} x{count}" if count > 1 else name for name, count in sorted(counts.items())
+    )
+
+
 def last_text(messages: Sequence[BaseMessage], default: str = "(no output produced)") -> str:
     """Most recent message that actually carries text.
 
@@ -46,7 +77,7 @@ def last_text(messages: Sequence[BaseMessage], default: str = "(no output produc
     empty content, so we walk backwards rather than taking ``messages[-1]``.
     """
     for message in reversed(messages):
-        text = str(message.content).strip()
+        text = text_of(message).strip()
         if text:
             return text
     return default
@@ -68,12 +99,17 @@ def build_specialist(
         """Decide the next action; increments the iteration counter."""
         messages: list[BaseMessage] = [system_message, *state["messages"]]
         if state.get("last_error"):
-            messages.append(SystemMessage(content=f"Previous error to fix: {state['last_error']}"))
+            # A human turn, not a system one: this is an observation about what
+            # just happened, and a second system message part-way down the list
+            # is what Anthropic rejects as "multiple non-consecutive system
+            # messages". normalize() would hoist it to the front regardless,
+            # losing the "this just failed" positioning that makes it useful.
+            messages.append(HumanMessage(content=f"Previous error to fix: {state['last_error']}"))
 
         error = ""
         try:
             model = llm_factory().bind_tools(tool_list) if tool_list else llm_factory()
-            response: BaseMessage = model.invoke(messages)
+            response: BaseMessage = model.invoke(normalize(messages))
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s reasoning failed: %s", spec.name, exc)
             # Recorded, not swallowed: `route` sends it back here with the error

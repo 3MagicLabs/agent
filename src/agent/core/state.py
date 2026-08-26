@@ -18,6 +18,9 @@ class SupervisorState(TypedDict, total=False):
 
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next_agent: str
+    #: The router's justification for the current delegation, passed through to
+    #: the specialist so it knows its task instead of inferring one.
+    instruction: str
     #: Delegation rounds consumed. Bounded by Settings.max_supervisor_steps.
     steps: Annotated[int, operator.add]
 
