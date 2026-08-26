@@ -33,6 +33,7 @@ repos:
           - langgraph>=1.2,<2
           - langchain-core>=1.5,<2
           - langchain-openai>=1.4,<2
+          - langchain-anthropic>=1.6,<2
         args: [--config-file=pyproject.toml]
         pass_filenames: false
 
