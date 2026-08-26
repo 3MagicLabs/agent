@@ -264,11 +264,11 @@ def list_downloaded_files() -> str:
     return json.dumps(entries) if entries else "No files downloaded yet."
 
 
-def _spec(name: str, tool_obj: BaseTool, capability: str) -> ToolSpec:
+def _spec(name: str, tool_obj: BaseTool, capability: str, cacheable: bool = False) -> ToolSpec:
     factory: Callable[[], BaseTool] = lambda: tool_obj  # noqa: E731
-    return ToolSpec(name=name, capability=capability, factory=factory)
+    return ToolSpec(name=name, capability=capability, factory=factory, cacheable=cacheable)
 
 
 register(_spec("download_task_file", download_task_file, "files"))
-register(_spec("read_file", read_file, "files"))
+register(_spec("read_file", read_file, "files", cacheable=True))
 register(_spec("list_downloaded_files", list_downloaded_files, "files"))

@@ -153,10 +153,22 @@ def wikipedia_lookup(title: str) -> str:
         return f"Wikipedia lookup failed: {exc}"
 
 
-def _spec(name: str, tool_obj: BaseTool, capability: str, requires: tuple[str, ...]) -> ToolSpec:
-    return ToolSpec(name=name, capability=capability, factory=lambda: tool_obj, requires=requires)
+def _spec(
+    name: str,
+    tool_obj: BaseTool,
+    capability: str,
+    requires: tuple[str, ...],
+    cacheable: bool = False,
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        capability=capability,
+        factory=lambda: tool_obj,
+        requires=requires,
+        cacheable=cacheable,
+    )
 
 
-register(_spec("web_search", web_search, "search", ("has_search",)))
-register(_spec("scrape_webpage", scrape_webpage, "scrape", ()))
-register(_spec("wikipedia_lookup", wikipedia_lookup, "search", ()))
+register(_spec("web_search", web_search, "search", ("has_search",), cacheable=True))
+register(_spec("scrape_webpage", scrape_webpage, "scrape", (), cacheable=True))
+register(_spec("wikipedia_lookup", wikipedia_lookup, "search", (), cacheable=True))

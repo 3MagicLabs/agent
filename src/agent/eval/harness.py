@@ -24,6 +24,7 @@ from agent.core.prompts import NO_ANSWER
 from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
+from agent.tools.cache import get_cache
 
 log = get_logger("eval.harness")
 
@@ -185,6 +186,10 @@ class BenchmarkRunner:
         question = str(item.get("question", ""))
         limit = timeout_s if timeout_s is not None else self.settings.per_question_timeout_s
         handler = usage_callback()
+        # Tool results are memoised per task. Tools are built once, with the
+        # orchestrator, so without this every entry would live as long as the
+        # process - and a Space runs for days.
+        get_cache().new_generation()
         started = time.monotonic()
 
         executor = ThreadPoolExecutor(max_workers=1)
