@@ -181,16 +181,25 @@ class TestDefaults:
         correct answer.
         """
         settings = Settings()
-        calls = settings.max_supervisor_steps * settings.max_web_iterations
+        calls = settings.max_supervisor_steps * max(
+            settings.max_web_iterations, settings.max_code_iterations
+        )
 
-        assert settings.per_question_timeout_s >= calls * 20.0
+        # 8s per call, measured: five real tasks averaged 2-4s per LLM call
+        # against Anthropic. The original 20s came from Groq, where every
+        # call carried throttling - and like the token limits and the pacer,
+        # it outlived the provider it was measured on.
+        assert settings.per_question_timeout_s >= calls * 8.0
         assert settings.total_budget_s >= settings.per_question_timeout_s
 
 
 class TestEffort:
-    def test_the_router_runs_cheap_by_default(self):
-        """It picks one name and writes a sentence; depth buys nothing."""
-        assert Settings().router_effort == "low"
+    def test_the_router_does_not_run_at_the_lowest_effort(self):
+        """At "low" it returned an empty object - 0 output tokens, no fields -
+        and the pydantic validation failure ended a task that had succeeded on
+        every previous run. A component that must emit valid structured output
+        has to earn the right to be cheap."""
+        assert Settings().router_effort != "low"
 
     def test_the_specialist_runs_at_medium(self):
         """Level-1 tasks are lookups and small computations, not deep

@@ -48,7 +48,7 @@ class SpecialistSpec:
         return self.name
 
 
-def tool_evidence(messages: Sequence[BaseMessage]) -> str:
+def tool_evidence(messages: Sequence[BaseMessage], *, has_tools: bool = True) -> str:
     """Which tools actually ran, as one line the supervisor can read.
 
     The supervisor sees only a specialist's final text, so a researched answer
@@ -58,6 +58,12 @@ def tool_evidence(messages: Sequence[BaseMessage]) -> str:
     the claim "wasn't confirmed with a search" while eight searches sat in the
     log.
 
+    ``has_tools`` distinguishes the two ways of running no tools. A specialist
+    that could have searched and did not has produced a claim; one that has no
+    tools at all has done exactly its job. Reporting both as "unverified" made
+    the supervisor re-delegate after every single reason_agent turn, since that
+    specialist is tool-less by design and can never satisfy the check.
+
     ``ToolMessage`` is the evidence rather than ``AIMessage.tool_calls``: a call
     can be requested and still never run.
     """
@@ -65,6 +71,8 @@ def tool_evidence(messages: Sequence[BaseMessage]) -> str:
         str(message.name or "unknown") for message in messages if isinstance(message, ToolMessage)
     )
     if not counts:
+        if not has_tools:
+            return "reasoned directly - this specialist has no tools by design"
         return "no tools were used - this answer is unverified"
     return ", ".join(
         f"{name} x{count}" if count > 1 else name for name, count in sorted(counts.items())

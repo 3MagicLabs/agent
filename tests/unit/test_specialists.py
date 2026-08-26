@@ -117,3 +117,26 @@ class TestToolEvidence:
         )
 
         assert "unverified" in tool_evidence([requested])
+
+
+class TestToollessEvidence:
+    """A specialist with no tools has not failed to use them."""
+
+    def test_a_toolless_specialist_is_not_marked_unverified(self):
+        """reason_agent has tools=() by design, so 'unverified' made the
+        supervisor re-delegate after every single reasoning turn."""
+        evidence = tool_evidence([AIMessage(content="b, e")], has_tools=False)
+
+        assert "unverified" not in evidence
+        assert "no tools by design" in evidence
+
+    def test_a_tooled_specialist_that_used_none_is_still_unverified(self):
+        evidence = tool_evidence([AIMessage(content="probably 3")], has_tools=True)
+
+        assert "unverified" in evidence
+
+    def test_tools_that_ran_are_reported_either_way(self):
+        messages = [ToolMessage(content="r", name="web_search", tool_call_id="1")]
+
+        assert tool_evidence(messages, has_tools=True) == "web_search"
+        assert tool_evidence(messages, has_tools=False) == "web_search"

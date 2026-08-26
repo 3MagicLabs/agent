@@ -84,7 +84,7 @@ class Settings:
     #: deliberately rather than left blank: a recorded "medium" is a
     #: configuration under test, whereas a blank is only "whatever the provider
     #: chose", which is not a thing an A/B can compare against.
-    router_effort: str = "low"
+    router_effort: str = "medium"
     specialist_effort: str = "medium"
     finalizer_effort: str = "low"
     #: Ceiling for any call that does not bind its own. Anthropic requires
@@ -95,17 +95,25 @@ class Settings:
 
     # --- orchestration budgets ---
     max_supervisor_steps: int = 4
-    max_web_iterations: int = 3
-    max_code_iterations: int = 3
+    max_web_iterations: int = 5
+    max_code_iterations: int = 6
     history_window: int = 8
 
     # --- run budgets ---
     per_question_timeout_s: float = 300.0
     total_budget_s: float = 6000.0
     #: Provider tokens-per-minute allowance; the runner sleeps between tasks to
-    #: stay under it. 0 disables pacing. Groq's free tier reports 12000 in its
-    #: x-ratelimit-limit-tokens header.
-    tokens_per_minute: int = 12000
+    #: stay under it. 0 disables pacing.
+    #:
+    #: Disabled by default because the default provider does not need it.
+    #: 12000 was Groq's free-tier figure, where exceeding it meant long
+    #: throttles that degraded answers as well as delaying them. Anthropic
+    #: answers a 429 with retry-after and the SDK retries, so backpressure is
+    #: handled where it is measured rather than guessed at here - and the
+    #: stale number spent 255 of one 411-second run's seconds asleep.
+    #:
+    #: Set it when running against a provider with a known, tight ceiling.
+    tokens_per_minute: int = 0
     #: Dollar ceilings. The free provider had an involuntary daily token cap;
     #: a paid one has none, so this is the only thing standing between a
     #: retry loop and real money. 0 disables a ceiling.

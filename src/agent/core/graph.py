@@ -143,25 +143,34 @@ class Orchestrator:
             [self._system, *trim(list(state["messages"]), self.settings.history_window)],
             ROUTER_REQUEST,
         )
-        try:
-            # Capped like the finalizer: the router emits one schema selection
-            # and a short justification, so it never needs a specialist's room.
-            capped = get_llm().bind(max_tokens=self.settings.max_router_tokens)
-            router = with_effort(capped, self.settings.router_effort).with_structured_output(
-                self._route_model, method="function_calling"
-            )
-            # Typed Any deliberately. with_structured_output declares a
-            # non-Optional return, which would make the None check below
-            # unreachable - but that is a promise about a well-behaved provider,
-            # and this codebase exists because providers return things their
-            # type signatures did not predict.
-            decision: Any = router.invoke(messages)
-        except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
-            log.error("Routing failed (%s) - finishing with what we have.", exc)
-            return {"next_agent": FINISH, "steps": 1}
+        # Capped like the finalizer: the router emits one schema selection
+        # and a short justification, so it never needs a specialist's room.
+        capped = get_llm().bind(max_tokens=self.settings.max_router_tokens)
+        router = with_effort(capped, self.settings.router_effort).with_structured_output(
+            self._route_model, method="function_calling"
+        )
+        # Retried once. A router that returns an empty object is not a failed
+        # run, it is a hiccup: the SDK retries transport errors, but a call that
+        # succeeds and returns {} is not an error it can see. Without this, one
+        # such reply ends the task - measured, on a task that had succeeded
+        # every previous time.
+        #
+        # Typed Any deliberately. with_structured_output declares a non-Optional
+        # return, which would make the None check unreachable - but that is a
+        # promise about a well-behaved provider, and this codebase exists
+        # because providers return things their type signatures did not predict.
+        decision: Any = None
+        for attempt in (1, 2):
+            try:
+                decision = router.invoke(messages)
+            except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
+                log.warning("Routing attempt %d failed: %s", attempt, exc)
+                continue
+            if decision is not None:
+                break
 
         if decision is None:
-            log.error("Router returned no decision - finishing.")
+            log.error("Router returned no usable decision - finishing with what we have.")
             return {"next_agent": FINISH, "steps": 1}
 
         target = str(getattr(decision, "next_agent", FINISH))
@@ -172,6 +181,7 @@ class Orchestrator:
     def _make_specialist_node(self, name: str) -> Callable[[SupervisorState], dict[str, Any]]:
         """Wrap a specialist subgraph as a supervisor node."""
         subgraph = self._subgraphs[name]
+        has_tools = bool(next(s for s in self.specs if s.name == name).tools)
 
         def node(state: SupervisorState) -> dict[str, Any]:
             seeded = trim(list(state["messages"]), 4)
@@ -197,7 +207,7 @@ class Orchestrator:
                 # produced nothing echoes its own input back - double-tagged.
                 appended = list(result["messages"])[len(seeded) :]
                 content = last_text(appended)
-                evidence = tool_evidence(appended)
+                evidence = tool_evidence(appended, has_tools=has_tools)
             except Exception as exc:  # noqa: BLE001 - one specialist failing is recoverable
                 log.error("%s failed: %s", name, exc)
                 content = f"{name} failed with error: {exc}"
