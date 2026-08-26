@@ -64,7 +64,7 @@ class TestScrape:
 
         result = scrape_webpage.invoke({"url": "https://example.com"})
 
-        assert "[content truncated]" in result
+        assert "content elided" in result
         assert len(result) <= settings.max_scrape_chars + 50
 
     def test_non_html_is_returned_raw(self, fake_get):
@@ -184,7 +184,7 @@ class TestSandboxRendering:
     def test_output_is_truncated(self):
         execution = FakeExecution(logs=FakeLogs(stdout=["x" * 500]))
 
-        assert "[output truncated]" in _render(execution, limit=50)
+        assert "output elided" in _render(execution, limit=50)
 
     def test_stderr_is_labelled(self):
         execution = FakeExecution(logs=FakeLogs(stdout=["ok"], stderr=["warning"]))

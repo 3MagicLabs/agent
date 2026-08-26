@@ -18,6 +18,7 @@ from langchain_core.tools import BaseTool, tool
 from agent.config import get_settings
 from agent.obs.logging import get_logger
 from agent.tools.registry import ToolSpec, register
+from agent.tools.text import elide
 
 log = get_logger("tools.files")
 
@@ -219,14 +220,14 @@ def _read_tabular(path: Path, limit: int) -> str:
         f"{path.name}: {len(frame)} rows x {len(frame.columns)} columns\n"
         f"Columns: {list(frame.columns)}\n\n"
     )
-    return str(header + frame.to_string(max_rows=200))[:limit]
+    # pandas already elides the middle rows; a head slice on top of that would
+    # undo it and drop the last rows - where a spreadsheet keeps its total.
+    return elide(str(header + frame.to_string(max_rows=200)), limit, note="rows elided")
 
 
 def _read_text(path: Path, limit: int) -> str:
     text = path.read_text(encoding="utf-8", errors="replace")
-    if len(text) > limit:
-        return text[:limit] + "\n...[content truncated]"
-    return text
+    return elide(text, limit)
 
 
 @tool

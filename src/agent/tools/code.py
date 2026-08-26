@@ -15,6 +15,7 @@ from langchain_core.tools import tool
 from agent.config import get_settings
 from agent.obs.logging import get_logger
 from agent.tools.registry import ToolSpec, register
+from agent.tools.text import elide
 
 log = get_logger("tools.code")
 
@@ -68,7 +69,8 @@ def _execute(sandbox: Any, code: str, timeout_s: float | None = None) -> Any:
 def _render(execution: Any, limit: int) -> str:
     if getattr(execution, "error", None):
         error = execution.error
-        return f"Execution Error: {error.name}: {error.value}\n{(error.traceback or '')[:limit]}"
+        traceback = elide(error.traceback or "", limit, note="traceback elided")
+        return f"Execution Error: {error.name}: {error.value}\n{traceback}"
 
     parts: list[str] = []
     logs = getattr(execution, "logs", None)
@@ -85,9 +87,7 @@ def _render(execution: Any, limit: int) -> str:
     output = "\n".join(part for part in parts if part).strip()
     if not output:
         return "Executed successfully with no output. Did you forget to print()?"
-    if len(output) > limit:
-        return output[:limit] + "\n...[output truncated]"
-    return output
+    return elide(output, limit, note="output elided")
 
 
 @tool
