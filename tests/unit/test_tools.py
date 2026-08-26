@@ -94,7 +94,7 @@ class TestFiles:
         """No HF_TOKEN must degrade quietly rather than hitting a 401 per task."""
         import agent.tools.files as files_module
 
-        files_module._dataset_index.cache_clear()
+        files_module._INDEX.clear()
         assert files_module._dataset_index() == {}
 
 

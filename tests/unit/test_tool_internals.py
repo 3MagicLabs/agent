@@ -6,7 +6,7 @@ tested without touching the network.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -254,3 +254,70 @@ class TestSandboxExecution:
         monkeypatch.setattr(code_module, "_load_sandbox_class", missing)
 
         assert "unavailable" in python_repl.invoke({"code": "print(1)"})
+
+
+class TestDatasetIndex:
+    """The GAIA listing must retry after a failure, not memoise it."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_index(self):
+        files_module._INDEX.clear()
+        yield
+        files_module._INDEX.clear()
+
+    def test_a_failed_listing_is_retried(self, monkeypatch, settings):
+        """One transient error must not disable attachments for the process.
+
+        Measured before this fix: six consecutive tasks failed against an empty
+        index while the same request succeeded a minute later.
+        """
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token="t"))
+        attempts: list[int] = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                if len(attempts) == 1:
+                    raise OSError("transient")
+
+            def json(self) -> list[dict[str, str]]:
+                return [{"path": "2023/validation/abc.xlsx"}]
+
+        def fetch(*_args, **_kwargs):
+            attempts.append(1)
+            return Response()
+
+        monkeypatch.setattr(files_module.requests, "get", fetch)
+
+        assert files_module._dataset_index() == {}
+        assert files_module._dataset_index() == {"abc": "2023/validation/abc.xlsx"}
+        assert len(attempts) == 2
+
+    def test_a_successful_listing_is_cached(self, monkeypatch, settings):
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token="t"))
+        attempts: list[int] = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> list[dict[str, str]]:
+                return [{"path": "2023/validation/abc.xlsx"}]
+
+        def fetch(*_args, **_kwargs):
+            attempts.append(1)
+            return Response()
+
+        monkeypatch.setattr(files_module.requests, "get", fetch)
+
+        files_module._dataset_index()
+        files_module._dataset_index()
+
+        assert len(attempts) == 1
+
+    def test_no_token_means_no_listing_attempt(self, monkeypatch, settings):
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token=""))
+        monkeypatch.setattr(
+            files_module.requests, "get", lambda *a, **k: pytest.fail("should not fetch")
+        )
+
+        assert files_module._dataset_index() == {}
