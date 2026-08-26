@@ -8,6 +8,7 @@ submission is a separate step — a dropped connection must never lose a run.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,7 @@ from typing import Any
 import requests
 
 from agent.config import Settings, get_settings
+from agent.core.prompts import NO_ANSWER
 from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
@@ -29,6 +31,22 @@ AnswerFn = Callable[..., str]
 
 #: Floor for a per-task timeout derived from a nearly exhausted total budget.
 MIN_TASK_TIMEOUT_S = 1.0
+
+#: Marker the supervisor stamps on specialist output ("[web_agent]\n..."). Seeing
+#: it in a final answer proves the finalizer never ran, so the text is
+#: intermediate output rather than an answer.
+_SPECIALIST_TAG = re.compile(r"^\[(\w+)\]")
+
+#: Generous ceiling on a graded answer. GAIA answers are a number, a short
+#: string or a comma-separated list; anything near this is runaway generation,
+#: not an answer. Deliberately far above any legitimate value so the rule stays
+#: structural - it never has to know what the task was.
+MAX_ANSWER_CHARS = 1000
+
+#: Named in the attachment prompt because the model does not reliably infer them
+#: from tool docstrings alone. Guarded by a test that they remain registered.
+DOWNLOAD_TOOL = "download_task_file"
+READ_TOOL = "read_file"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,14 +65,46 @@ def build_prompt(item: dict[str, Any]) -> str:
     prompt = str(item.get("question", ""))
     task_id = item.get("task_id", "")
     if item.get("file_name"):
+        # Naming the tools explicitly is load-bearing, not redundant. Stating
+        # only that a file exists and leaving the model to infer the tools from
+        # their docstrings was measured: the xlsx task stopped fetching its file
+        # and went from 17949.59 to 0.00. The coupling this creates is guarded by
+        # test_the_named_tools_exist, which fails loudly if either is renamed.
         prompt += (
             f"\n\n[This task has an attached file: {item['file_name']}. "
-            f"Call download_task_file with task_id='{task_id}' to retrieve it, "
-            f"then read_file on the returned path.]"
+            f"Call {DOWNLOAD_TOOL} with task_id='{task_id}' to retrieve it, "
+            f"then {READ_TOOL} on the returned path.]"
         )
     if item.get("file_url"):
         prompt += f"\n[File URL: {item['file_url']}]"
     return prompt
+
+
+def rejection_reason(answer: str) -> str:
+    """Why ``answer`` is not a usable answer, or "" when it is.
+
+    Note the inversion: an empty return means accepted. Callers treat any
+    non-empty string as both the rejection and its explanation, so it can be
+    recorded directly as ``TaskMetric.error``.
+
+    This asks only whether the agent produced an answer at all - never whether
+    it is correct. Grading lives in ``agent.eval.scorers``.
+    """
+    stripped = answer.strip()
+    if not stripped:
+        return "empty answer"
+    if stripped == NO_ANSWER:
+        # The finalizer's way of saying it had nothing to work from. Without a
+        # legal way to fail it was instructed to guess instead, and a fluent
+        # guess passes every check below - it is only distinguishable from a
+        # real answer by provenance, which a shape check cannot see.
+        return "no answer found"
+    tag = _SPECIALIST_TAG.match(stripped)
+    if tag:
+        return f"unfinalized {tag.group(1)} output"
+    if len(stripped) > MAX_ANSWER_CHARS:
+        return f"answer too long ({len(stripped)} chars)"
+    return ""
 
 
 class AnswerCache:
@@ -108,7 +158,8 @@ class BenchmarkRunner:
         if self._answer_fn is None:
             from agent.core.graph import answer_question
 
-            self._answer_fn = answer_question
+            resolved: AnswerFn = answer_question
+            self._answer_fn = resolved
         return self._answer_fn
 
     # --- data ----------------------------------------------------------
@@ -151,6 +202,11 @@ class BenchmarkRunner:
             # Never wait: a hung task must not block the rest of the batch.
             executor.shutdown(wait=False)
 
+        if status == "ok":
+            reason = rejection_reason(answer)
+            if reason:
+                status, error = "error", reason
+
         return TaskMetric(
             task_id=task_id,
             question=question,
@@ -161,6 +217,22 @@ class BenchmarkRunner:
             tokens=total_tokens(handler),
             model=self.settings.model,
         )
+
+    def pause_for(self, metric: TaskMetric) -> float:
+        """Seconds to wait so the run stays under the provider's token rate.
+
+        A task costing N tokens occupies N/tpm of a minute. The task's own
+        latency already spent part of that window, so only the remainder is
+        slept. Measured, not guessed: a 20-task run spent its entire minute on
+        the first six tasks and took 429s on the other fourteen - and the
+        throttling degraded the answers that did get through, so this is a
+        correctness fix as much as a completion one.
+        """
+        rate = self.settings.tokens_per_minute
+        used = int(metric.tokens.get("total_tokens", 0))
+        if rate <= 0 or used <= 0:
+            return 0.0
+        return max(0.0, used / rate * 60.0 - metric.latency_s)
 
     def run(
         self,
@@ -212,6 +284,11 @@ class BenchmarkRunner:
                 message=f"[{index}/{total}] {task_id}: {metric.status} ({metric.latency_s:.0f}s)",
                 metric=metric,
             )
+
+            pause = self.pause_for(metric) if index < total else 0.0
+            if pause > 0:
+                log.info("pacing %.0fs after %s tokens", pause, metric.tokens)
+                time.sleep(pause)
 
         yield Progress(
             index=total,

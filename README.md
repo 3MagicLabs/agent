@@ -16,7 +16,7 @@ hf_oauth_expiration_minutes: 480
 [![CI](https://github.com/3MagicLabs/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/3MagicLabs/agent/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/3MagicLabs/agent/actions/workflows/codeql.yml/badge.svg)](https://github.com/3MagicLabs/agent/actions/workflows/codeql.yml)
 [![Security](https://github.com/3MagicLabs/agent/actions/workflows/security.yml/badge.svg)](https://github.com/3MagicLabs/agent/actions/workflows/security.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
@@ -112,4 +112,4 @@ Space installs. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.

@@ -29,10 +29,37 @@ def _load_sandbox_class() -> Any:
     return sandbox_cls
 
 
-def _execute(sandbox: Any, code: str) -> Any:
-    """Run a cell across E2B SDK generations."""
+def _open_sandbox(sandbox_cls: Any, timeout_s: int) -> Any:
+    """Construct a sandbox across E2B SDK generations.
+
+    2.x replaced ``Sandbox(timeout=...)`` with the ``Sandbox.create(...)``
+    factory; calling the constructor directly now demands internal connection
+    arguments (sandbox_id, envd_version, ...) and fails.
+    """
+    if hasattr(sandbox_cls, "create"):
+        return sandbox_cls.create(timeout=timeout_s)
+    return sandbox_cls(timeout=timeout_s)
+
+
+def _close_sandbox(sandbox: Any) -> None:
+    """Release a sandbox; a leaked one keeps billing against the quota."""
+    killer = getattr(sandbox, "kill", None)
+    if killer is None:
+        return
+    try:
+        killer()
+    except Exception as exc:  # noqa: BLE001 - cleanup must never mask the result
+        log.warning("Could not release sandbox: %s", exc)
+
+
+def _execute(sandbox: Any, code: str, timeout_s: float | None = None) -> Any:
+    """Run a cell across E2B SDK generations.
+
+    ``timeout`` moved from the sandbox constructor to ``run_code`` in the 2.x
+    SDK; passing it to ``Sandbox(...)`` raises TypeError.
+    """
     if hasattr(sandbox, "run_code"):
-        return sandbox.run_code(code)
+        return sandbox.run_code(code, timeout=timeout_s)
     if hasattr(sandbox, "notebook"):
         return sandbox.notebook.exec_cell(code)
     raise AttributeError("Unsupported E2B sandbox API: no run_code or notebook")
@@ -84,12 +111,17 @@ def python_repl(code: str) -> str:
         log.error("E2B SDK unavailable: %s", exc)
         return f"Code execution is unavailable: {exc}"
 
+    sandbox = None
     try:
-        with sandbox_cls(timeout=settings.sandbox_timeout_s) as sandbox:
-            return _render(_execute(sandbox, code), settings.max_code_output_chars)
+        sandbox = _open_sandbox(sandbox_cls, int(settings.sandbox_timeout_s))
+        execution = _execute(sandbox, code, timeout_s=settings.sandbox_timeout_s)
+        return _render(execution, settings.max_code_output_chars)
     except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
         log.error("Sandbox execution failed: %s", exc)
         return f"System Error connecting to sandbox: {exc}"
+    finally:
+        if sandbox is not None:
+            _close_sandbox(sandbox)
 
 
 register(

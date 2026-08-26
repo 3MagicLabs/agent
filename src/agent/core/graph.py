@@ -8,6 +8,7 @@ supervisor can ping-pong between specialists indefinitely.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, Literal
@@ -16,17 +17,20 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, create_model
 
-from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text
+from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
+from agent.core.conversation import normalize, text_of
 from agent.core.llm import get_llm
-from agent.core.prompts import FINALIZER, SUPERVISOR
+from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
+from agent.tools.files import downloaded_inventory
 
 log = get_logger("core.graph")
 
 FINISH = "FINISH"
+FINAL_ANSWER = "final_answer"
 
 
 class RouteDecision(BaseModel):
@@ -70,15 +74,45 @@ def trim(messages: list[BaseMessage], keep: int) -> list[BaseMessage]:
     return [messages[0], *messages[-(keep - 1) :]]
 
 
+#: Conversational lead-ins the model emits despite being told not to. Observed:
+#: "Therefore, the answer is 5." on a task whose graded answer was "5".
+_PREAMBLE = re.compile(
+    r"^\s*(?:therefore|thus|so|hence)?[,\s]*" r"(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_answer(text: str) -> str:
+    """Strip wrapping the grader would count as a wrong answer.
+
+    Exact match makes "Therefore, the answer is 5." and "5" as different as
+    right and wrong. The prompt already forbids preamble; this is the
+    deterministic backstop for when the model does it anyway.
+
+    Only unambiguous wrapping is removed - never punctuation inside the answer,
+    so decimals and comma-separated lists survive intact.
+    """
+    cleaned = _PREAMBLE.sub("", text.strip()).strip()
+    if len(cleaned) > 1 and cleaned[0] == cleaned[-1] and cleaned[0] in "\"'":
+        cleaned = cleaned[1:-1].strip()
+    if cleaned.endswith(".") and not cleaned.endswith(".."):
+        cleaned = cleaned[:-1].strip()
+    return cleaned or text.strip()
+
+
 class Orchestrator:
     """Compiled supervisor graph bound to a settings snapshot."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.specs = all_specs(self.settings)
+        self._subgraphs = {spec.name: build_specialist(spec) for spec in self.specs}
+        # The roster is fixed for the whole run. Narrowing it as specialists are
+        # used looks tempting, but with_structured_output does not constrain
+        # generation on Groq - it validates afterwards and returns a hard 400.
+        # Removing a choice the model still wants turns a retry into a failure.
         self._route_model = build_route_model(self.specs)
         self._system = SystemMessage(content=routing_prompt(self.specs))
-        self._subgraphs = {spec.name: build_specialist(spec) for spec in self.specs}
         self.graph = self._compile()
 
     # --- nodes ---------------------------------------------------------
@@ -90,10 +124,18 @@ class Orchestrator:
             log.warning("Supervisor step budget (%d) exhausted - finishing.", budget)
             return {"next_agent": FINISH, "steps": 1}
 
-        messages = [self._system, *trim(list(state["messages"]), self.settings.history_window)]
+        messages = normalize(
+            [self._system, *trim(list(state["messages"]), self.settings.history_window)],
+            ROUTER_REQUEST,
+        )
         try:
             router = get_llm().with_structured_output(self._route_model, method="function_calling")
-            decision = router.invoke(messages)
+            # Typed Any deliberately. with_structured_output declares a
+            # non-Optional return, which would make the None check below
+            # unreachable - but that is a promise about a well-behaved provider,
+            # and this codebase exists because providers return things their
+            # type signatures did not predict.
+            decision: Any = router.invoke(messages)
         except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
             log.error("Routing failed (%s) - finishing with what we have.", exc)
             return {"next_agent": FINISH, "steps": 1}
@@ -103,54 +145,76 @@ class Orchestrator:
             return {"next_agent": FINISH, "steps": 1}
 
         target = str(getattr(decision, "next_agent", FINISH))
-        log.info(
-            "step %d/%d -> %s (%s)",
-            step + 1,
-            budget,
-            target,
-            getattr(decision, "reasoning", ""),
-        )
-        return {"next_agent": target, "steps": 1}
+        instruction = str(getattr(decision, "reasoning", ""))
+        log.info("step %d/%d -> %s (%s)", step + 1, budget, target, instruction)
+        return {"next_agent": target, "instruction": instruction, "steps": 1}
 
     def _make_specialist_node(self, name: str) -> Callable[[SupervisorState], dict[str, Any]]:
         """Wrap a specialist subgraph as a supervisor node."""
         subgraph = self._subgraphs[name]
 
         def node(state: SupervisorState) -> dict[str, Any]:
-            payload = {
-                "messages": trim(list(state["messages"]), 4),
-                "iterations": 0,
-                "last_error": "",
-            }
+            seeded = trim(list(state["messages"]), 4)
+            # A specialist gets a fresh state on every delegation, so it has no
+            # memory of work it already did. Pushing the inventory is what stops
+            # the second delegation re-fetching what the first one downloaded.
+            inventory = downloaded_inventory()
+            if inventory:
+                seeded = [*seeded, SystemMessage(content=inventory)]
+            # The router already generated a justification for this delegation
+            # and we already paid for it; it used to be logged and discarded,
+            # leaving the specialist to infer its task from the raw transcript.
+            instruction = state.get("instruction", "").strip()
+            if instruction:
+                seeded = [*seeded, HumanMessage(content=f"Your task: {instruction}")]
+            payload = {"messages": seeded, "iterations": 0, "last_error": ""}
             try:
                 result = subgraph.invoke(
                     payload, config={"recursion_limit": self.settings.recursion_limit}
                 )
-                content = last_text(result["messages"])
+                # Only what the subgraph appended. Running last_text over the whole
+                # list walks back into the seed messages, so a specialist that
+                # produced nothing echoes its own input back - double-tagged.
+                appended = list(result["messages"])[len(seeded) :]
+                content = last_text(appended)
+                evidence = tool_evidence(appended)
             except Exception as exc:  # noqa: BLE001 - one specialist failing is recoverable
                 log.error("%s failed: %s", name, exc)
                 content = f"{name} failed with error: {exc}"
+                evidence = "the specialist failed before producing evidence"
 
             return {
-                "messages": [AIMessage(content=f"[{name}]\n{content}", name=name)],
+                "messages": [AIMessage(content=f"[{name}] ({evidence})\n{content}", name=name)],
                 "steps": 0,
             }
 
         return node
 
     def _finalize(self, state: SupervisorState) -> dict[str, Any]:
+        # The trailing user turn is load-bearing. Specialist output is an
+        # AIMessage, and when it happens to end with its own "Answer: ..."
+        # block the model reads the conversation as already complete and
+        # returns a single stop token - measured 3/3 empty without this line
+        # and 3/3 correct with it, on the same captured conversation.
         messages = [
             SystemMessage(content=FINALIZER),
             *trim(list(state["messages"]), self.settings.history_window),
+            HumanMessage(content=FINALIZER_REQUEST),
         ]
+        # Capped: the answer is a few words, and an uncapped repetition loop
+        # once emitted 4,344 tokens of a single sentence repeated.
+        finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
         try:
-            content = str(get_llm().invoke(messages).content).strip()
-        except Exception as exc:  # noqa: BLE001 - fall back to the raw last message
+            # text_of, not str(...content): with thinking enabled the content is
+            # a list of typed blocks, and str() over it yields the repr - which
+            # once shipped `[{'signature': 'EsEECpAB...` as a final answer.
+            content = clean_answer(text_of(finalizer.invoke(normalize(messages))))
+        except Exception as exc:
             log.error("Finalizer failed: %s", exc)
-            content = last_text(list(state["messages"]), default="")
+            raise
 
         log.info("final answer: %s", content[:200])
-        return {"messages": [AIMessage(content=content, name="final_answer")], "steps": 0}
+        return {"messages": [AIMessage(content=content, name=FINAL_ANSWER)], "steps": 0}
 
     def _route(self, state: SupervisorState) -> str:
         target = state.get("next_agent", FINISH)
@@ -186,7 +250,10 @@ class Orchestrator:
             initial_supervisor_state([HumanMessage(content=question)]),
             config=trace_config(task_id, callbacks),
         )
-        return last_text(list(final_state["messages"]), default="")
+        for message in reversed(list(final_state["messages"])):
+            if getattr(message, "name", "") == FINAL_ANSWER:
+                return str(message.content).strip()
+        return ""
 
 
 @lru_cache(maxsize=1)

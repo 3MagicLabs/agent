@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))  # so `import app` (the Space entry point) resolve
 from agent.config import Settings, reset_settings, set_settings
 
 CREDENTIAL_VARS = (
+    "LLM_PROVIDER",
     "GROQ_API_KEY",
     "OPENAI_API_KEY",
     "HF_TOKEN",
@@ -53,11 +54,17 @@ class StubLLM:
         self.reply = reply
         self.route_to = route_to
         self.calls: list[list[BaseMessage]] = []
+        self.bound: dict[str, Any] = {}
 
     def with_structured_output(self, model_cls: type, **_kwargs: Any) -> StubRouter:
         return StubRouter(model_cls, self.route_to)
 
     def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
+        return self
+
+    def bind(self, **kwargs: Any) -> StubLLM:
+        """Record per-call overrides (``max_tokens``) and stay chainable."""
+        self.bound = {**self.bound, **kwargs}
         return self
 
     def invoke(self, messages: Sequence[BaseMessage]) -> AIMessage:
@@ -74,6 +81,9 @@ class FailingLLM:
     def bind_tools(self, *_args: Any, **_kwargs: Any) -> FailingLLM:
         return self
 
+    def bind(self, **_kwargs: Any) -> FailingLLM:
+        return self
+
     def invoke(self, *_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("provider exploded")
 
@@ -85,6 +95,10 @@ def clean_env(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     reset_settings()
     set_settings(Settings(log_dir=tmp_path / "logs", download_dir=tmp_path / "downloads"))
+
+    from agent.tools.files import _dataset_index
+
+    _dataset_index.cache_clear()  # a listing cached under other settings must not leak
     yield
     reset_settings()
 

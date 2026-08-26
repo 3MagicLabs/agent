@@ -197,7 +197,7 @@ class TestSandboxApiCompatibility:
 
     def test_prefers_run_code_on_modern_sdks(self):
         class Modern:
-            def run_code(self, code):
+            def run_code(self, code, timeout=None):
                 return f"ran {code}"
 
         assert _execute(Modern(), "1+1") == "ran 1+1"
@@ -234,7 +234,7 @@ class TestSandboxExecution:
             def __exit__(self, *_args):
                 return False
 
-            def run_code(self, _code):
+            def run_code(self, _code, timeout=None):
                 return FakeExecution(logs=FakeLogs(stdout=["7"]))
 
         monkeypatch.setattr(code_module, "_load_sandbox_class", lambda: FakeSandbox)

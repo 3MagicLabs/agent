@@ -64,6 +64,7 @@ class TestFiles:
         assert "print('hi')" in read_file.invoke({"path": "notes.py"})
 
     def test_download_failure_is_reported_not_raised(self, settings, monkeypatch):
+        """Every source unreachable must return a message, never raise."""
         import agent.tools.files as files_module
 
         def boom(*_args, **_kwargs):
@@ -72,7 +73,29 @@ class TestFiles:
         monkeypatch.setattr(files_module.requests, "get", boom)
         result = download_task_file.invoke({"task_id": "abc"})
 
-        assert "Could not download" in result
+        assert "No file is available" in result
+        assert "gaia-benchmark/GAIA" in result
+
+    def test_falls_back_to_the_dataset_when_the_scoring_api_has_no_file(
+        self, settings, monkeypatch, tmp_path
+    ):
+        """The scoring API returns 404 for all five attachment tasks."""
+        import agent.tools.files as files_module
+
+        monkeypatch.setattr(files_module, "_from_scoring_api", lambda _t: None)
+        monkeypatch.setattr(files_module, "_from_dataset", lambda _t: (b"col\n1\n", ".csv"))
+
+        result = download_task_file.invoke({"task_id": "abc"})
+
+        assert "Downloaded to" in result
+        assert (settings.download_dir / "abc.csv").read_bytes() == b"col\n1\n"
+
+    def test_the_dataset_is_skipped_without_a_token(self, settings, monkeypatch):
+        """No HF_TOKEN must degrade quietly rather than hitting a 401 per task."""
+        import agent.tools.files as files_module
+
+        files_module._dataset_index.cache_clear()
+        assert files_module._dataset_index() == {}
 
 
 class TestRegistry:
@@ -116,3 +139,39 @@ class TestWikipedia:
         monkeypatch.setattr(web_module.requests, "get", boom)
 
         assert "failed" in wikipedia_lookup.invoke({"title": "Mars"}).lower()
+
+
+class TestDownloadMemoisation:
+    """One task fetched the same spreadsheet four times: 83s and a rate limit."""
+
+    def test_an_existing_file_is_not_refetched(self, settings, monkeypatch):
+        import agent.tools.files as files_module
+
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "abc.xlsx").write_bytes(b"already here")
+
+        def explode(*_a, **_kw):
+            raise AssertionError("network hit despite a cached file")
+
+        monkeypatch.setattr(files_module.requests, "get", explode)
+        result = download_task_file.invoke({"task_id": "abc"})
+
+        assert "Already downloaded" in result
+        assert "abc.xlsx" in result
+
+    def test_inventory_is_empty_before_any_download(self, settings):
+        from agent.tools.files import downloaded_inventory
+
+        assert downloaded_inventory() == ""
+
+    def test_inventory_lists_files_with_sizes(self, settings):
+        from agent.tools.files import downloaded_inventory
+
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "data.xlsx").write_bytes(b"12345")
+
+        line = downloaded_inventory()
+
+        assert "data.xlsx" in line
+        assert "5 bytes" in line
+        assert "read_file" in line

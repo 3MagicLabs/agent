@@ -24,7 +24,16 @@ repos:
     rev: v1.14.1
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic, types-requests]
+        # pre-commit runs mypy in an isolated venv. Without the runtime deps,
+        # langgraph and langchain resolve to Any and the hook reports phantom
+        # errors that `make types` does not - see docs/codebase-tour.md.
+        additional_dependencies:
+          - pydantic
+          - types-requests
+          - langgraph>=1.2,<2
+          - langchain-core>=1.5,<2
+          - langchain-openai>=1.4,<2
+          - langchain-anthropic>=1.6,<2
         args: [--config-file=pyproject.toml]
         pass_filenames: false
 

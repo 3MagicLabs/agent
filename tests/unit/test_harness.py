@@ -7,7 +7,9 @@ import time
 import pytest
 
 from agent.config import Settings, set_settings
-from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt
+from agent.core.prompts import FINALIZER, NO_ANSWER
+from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
+from agent.obs.metrics import TaskMetric
 
 pytestmark = pytest.mark.unit
 
@@ -25,12 +27,33 @@ class TestBuildPrompt:
     def test_plain_question_is_unchanged(self):
         assert build_prompt({"task_id": "t", "question": "hi"}) == "hi"
 
-    def test_attachment_instructs_the_download_tool(self):
+    def test_attachment_is_flagged_with_its_name_and_id(self):
         prompt = build_prompt({"task_id": "abc", "question": "sum it", "file_name": "data.xlsx"})
 
         assert "data.xlsx" in prompt
-        assert "download_task_file" in prompt
-        assert "task_id='abc'" in prompt
+        assert "abc" in prompt
+
+    def test_the_named_tools_exist(self):
+        """The prompt names tools, so a rename must break a test, not a run.
+
+        Dropping the names entirely was tried and measured: the xlsx task
+        stopped fetching its attachment and answered 0.00 instead of 17949.59.
+        The instruction stays; this guards the coupling it creates.
+        """
+        from agent.eval.harness import DOWNLOAD_TOOL, READ_TOOL
+        from agent.tools import registered
+
+        names = {spec.name for spec in registered()}
+
+        assert {DOWNLOAD_TOOL, READ_TOOL} <= names
+
+    def test_the_prompt_uses_the_registered_names(self):
+        from agent.eval.harness import DOWNLOAD_TOOL, READ_TOOL
+
+        prompt = build_prompt({"task_id": "abc", "question": "sum it", "file_name": "data.xlsx"})
+
+        assert DOWNLOAD_TOOL in prompt
+        assert READ_TOOL in prompt
 
 
 class TestRun:
@@ -155,3 +178,109 @@ class TestSubmit:
     def test_empty_cache_refuses_to_submit(self, settings):
         with pytest.raises(ValueError, match="empty"):
             make_runner(lambda *_: "x").submit("me", "code-url")
+
+
+class TestRejectionReason:
+    """The predicate alone: string in, reason out. No runner, no fixtures."""
+
+    @pytest.mark.parametrize("answer", ["", "   ", "\n\t "])
+    def test_blank_answers_are_rejected(self, answer):
+        assert rejection_reason(answer) == "empty answer"
+
+    def test_specialist_tag_means_the_finalizer_never_ran(self):
+        assert "web_agent" in rejection_reason("[web_agent]\n1954")
+
+    @pytest.mark.parametrize("answer", ["1954", "Mercedes Sosa", "3, 4, 5", "-2.5"])
+    def test_real_answers_are_accepted(self, answer):
+        assert rejection_reason(answer) == ""
+
+    def test_runaway_generation_is_rejected(self):
+        """A repetition loop once emitted 7,876 characters of one Thai sentence."""
+        assert "too long" in rejection_reason("word " * 400)
+
+    def test_a_long_but_plausible_list_is_accepted(self):
+        assert rejection_reason(", ".join(str(n) for n in range(100))) == ""
+
+
+class TestAnswerValidation:
+    """The predicate wired in: a returned string is not by itself a success.
+
+    ``run_one`` used to stamp "ok" whenever no exception escaped the worker
+    thread, so an empty or unfinalized answer was cached and submitted.
+    """
+
+    def test_empty_answer_is_recorded_as_an_error(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "").run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        assert metric.error == "empty answer"
+
+    def test_unfinalized_output_is_recorded_as_an_error(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "[web_agent]\n1954").run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        # Quarantined, not deleted: the rejected text stays readable in the metrics.
+        assert metric.answer == "[web_agent]\n1954"
+
+    def test_a_real_answer_still_passes(self, settings):
+        metric = make_runner(lambda _q, _t, _c: "1954").run_one(QUESTIONS[0])
+
+        assert metric.status == "ok"
+        assert metric.error == ""
+
+    def test_a_rejected_answer_is_never_cached(self, settings):
+        runner = make_runner(lambda _q, _t, _c: "")
+
+        list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert runner.cache.load() == {}
+
+
+class TestPacing:
+    """A 20-task run spent its whole per-minute quota on the first six tasks."""
+
+    def _metric(self, tokens: int, latency: float) -> TaskMetric:
+        return TaskMetric(
+            task_id="t", question="q", tokens={"total_tokens": tokens}, latency_s=latency
+        )
+
+    def test_waits_for_the_rest_of_the_token_window(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        # 6000 tokens is half a minute of quota; 10s were already spent running.
+        assert make_runner(None).pause_for(self._metric(6000, 10.0)) == pytest.approx(20.0)
+
+    def test_a_slow_task_needs_no_extra_wait(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        assert make_runner(None).pause_for(self._metric(1000, 90.0)) == 0.0
+
+    def test_pacing_is_disabled_by_a_zero_rate(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=0))
+        assert make_runner(None).pause_for(self._metric(60000, 0.0)) == 0.0
+
+    def test_unmeasured_tokens_do_not_stall_the_run(self, tmp_path):
+        set_settings(Settings(log_dir=tmp_path, tokens_per_minute=12000))
+        assert make_runner(None).pause_for(self._metric(0, 1.0)) == 0.0
+
+
+class TestNoAnswerSentinel:
+    """The finalizer needs a legal way to fail.
+
+    Without one it was instructed to guess, and a fluent guess passes every
+    shape check - it differs from a real answer only in provenance, which
+    rejection_reason cannot see.
+    """
+
+    def test_the_sentinel_is_rejected(self):
+        assert rejection_reason(NO_ANSWER) == "no answer found"
+
+    def test_surrounding_whitespace_does_not_smuggle_it_through(self):
+        assert rejection_reason(f"  {NO_ANSWER}\n") == "no answer found"
+
+    def test_an_answer_that_merely_mentions_it_is_still_accepted(self):
+        """Only the bare sentinel means failure; the word may appear in prose."""
+        assert rejection_reason(f"the file contained {NO_ANSWER}") == ""
+
+    def test_the_prompt_asks_for_the_sentinel_rather_than_a_guess(self):
+        """Guard against the 'give your single best guess anyway' line returning."""
+        assert NO_ANSWER in FINALIZER
+        assert "best guess" not in FINALIZER.lower()

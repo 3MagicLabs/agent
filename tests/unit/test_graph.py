@@ -7,10 +7,18 @@ shut.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.core.graph import Orchestrator, build_route_model, routing_prompt, trim
+from agent.core.graph import (
+    Orchestrator,
+    build_route_model,
+    clean_answer,
+    routing_prompt,
+    trim,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -20,7 +28,7 @@ def test_router_choices_match_live_specialists(settings):
     model = build_route_model(orchestrator.specs)
     choices = model.model_fields["next_agent"].annotation.__args__
 
-    assert set(choices) == {"web_agent", "code_agent", "FINISH"}
+    assert set(choices) == {"reason_agent", "web_agent", "code_agent", "FINISH"}
 
 
 def test_routing_prompt_lists_every_specialist(settings):
@@ -62,13 +70,52 @@ def test_unknown_route_falls_through_to_finalize(settings, stub_llm):
     assert orchestrator._route({"next_agent": "nonexistent_agent"}) == "finalize"
 
 
-def test_provider_failure_does_not_crash_the_run(settings, failing_llm):
-    """Every LLM call raises; the run must still return a string."""
+def test_provider_failure_surfaces_as_an_exception(settings, failing_llm):
+    """A dead provider must raise, not return a plausible-looking string.
+
+    The finalizer used to fall back to the last non-empty message. When nothing
+    else had run, that was the question itself - so the prompt came back as the
+    answer, and the harness recorded twenty of them as successes on a 0% run.
+    """
     failing_llm()
 
-    answer = Orchestrator(settings).answer("anything", task_id="t2")
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        Orchestrator(settings).answer("anything", task_id="t2")
 
-    assert isinstance(answer, str)
+
+def test_the_finalizer_call_is_length_capped(settings, stub_llm):
+    """Without a ceiling, a repetition loop can bill thousands of output tokens."""
+    llm = stub_llm(reply="right", route_to="FINISH")
+
+    Orchestrator(settings).answer("opposite of left?", task_id="t4")
+
+    assert llm.bound["max_tokens"] == settings.max_answer_tokens
+
+
+def test_self_contained_questions_are_routed_away_from_the_web(settings):
+    """A reversed-text puzzle went to web_agent, whose results poisoned the context.
+
+    The supervisor must know that a tool-less specialist exists and is preferred
+    for questions answerable from their own text.
+    """
+    prompt = routing_prompt(Orchestrator(settings).specs)
+
+    assert "Prefer 'reason_agent'" in prompt
+    assert "reason_agent" in prompt
+
+
+def test_character_work_is_routed_to_code_not_reasoning(settings):
+    """LLMs read tokens, not characters; a reversal must go to Python."""
+    prompt = routing_prompt(Orchestrator(settings).specs)
+
+    assert "character-level" in prompt
+
+
+def test_the_reasoning_specialist_has_no_tools(settings):
+    """Its whole point is that it cannot search - that is what stops the poisoning."""
+    reason = next(s for s in Orchestrator(settings).specs if s.name == "reason_agent")
+
+    assert reason.tools == ()
 
 
 def test_answer_is_not_prefixed_with_the_specialist_label(settings, stub_llm):
@@ -96,3 +143,69 @@ class TestTrim:
         assert len(trimmed) == 4
         assert trimmed[0].content == "original"
         assert trimmed[-1].content == "19"
+
+
+class TestCleanAnswer:
+    """Exact match makes 'Therefore, the answer is 5.' and '5' as different as wrong and right."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Therefore, the answer is 5.", "5"),
+            ("The answer is Mercedes Sosa", "Mercedes Sosa"),
+            ("Final answer: 1954", "1954"),
+            ("answer: right", "right"),
+            ('"Saint Petersburg"', "Saint Petersburg"),
+            ("3", "3"),
+        ],
+    )
+    def test_strips_wrapping(self, raw, expected):
+        assert clean_answer(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["3.14", "-2.5", "a, b, c", "St. Petersburg"])
+    def test_leaves_the_answer_itself_alone(self, raw):
+        assert clean_answer(raw) == raw
+
+    def test_never_empties_an_answer(self):
+        assert clean_answer("answer is") == "answer is"
+
+
+def test_the_finalizer_prompt_ends_with_a_user_turn(settings, stub_llm):
+    """Ending on the specialist's AIMessage makes the model emit a stop token.
+
+    Measured: a specialist reply closing with its own "Answer: ..." block
+    produced completion_tokens=1 and empty content 3 times out of 3. Adding a
+    trailing request produced the correct answer 3 times out of 3.
+    """
+    llm = stub_llm(reply="right", route_to="FINISH")
+
+    Orchestrator(settings).answer("which are vegetables?", task_id="t5")
+
+    final_call = llm.calls[-1]
+    assert isinstance(final_call[-1], HumanMessage)
+
+
+def test_a_specialist_is_told_what_is_already_downloaded(settings):
+    """Pushed, not pulled: list_downloaded_files was called 0 times in 92 downloads.
+
+    A specialist gets a fresh state per delegation, so without this it re-fetches
+    what an earlier delegation already had - one task downloaded the same
+    spreadsheet four times.
+    """
+    settings.download_dir.mkdir(parents=True, exist_ok=True)
+    (settings.download_dir / "sales.xlsx").write_bytes(b"12345")
+
+    orchestrator = Orchestrator(settings)
+    seen: dict[str, Any] = {}
+
+    class RecordingSubgraph:
+        def invoke(self, payload, config=None):
+            seen["messages"] = payload["messages"]
+            return {"messages": [*payload["messages"], AIMessage(content="42")]}
+
+    orchestrator._subgraphs["web_agent"] = RecordingSubgraph()
+    orchestrator._make_specialist_node("web_agent")(
+        {"messages": [HumanMessage(content="total sales?")]}
+    )
+
+    assert any("sales.xlsx" in str(m.content) for m in seen["messages"])

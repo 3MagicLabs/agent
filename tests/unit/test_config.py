@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent.config import Settings, load_settings, reset_settings
+from agent.config import Settings, get_settings, load_settings, reset_settings
 from agent.core.llm import MissingCredentialsError, build_llm
 
 pytestmark = pytest.mark.unit
@@ -80,3 +80,108 @@ class TestInvalidEnvironment:
         """Import must never fail; construction is where it surfaces."""
         with pytest.raises(MissingCredentialsError, match="No LLM credentials"):
             build_llm(Settings())
+
+
+class TestProviderSelector:
+    """Ordering alone is not enough once more than one key is real.
+
+    With Groq's daily quota spent, GROQ_API_KEY still won the scan and the
+    HF token sat unused - the failure looked like an outage, not a config bug.
+    """
+
+    def test_named_provider_wins_over_the_scan_order(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("HF_TOKEN", "h")
+        monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+        reset_settings()
+
+        assert get_settings().provider == "huggingface"
+
+    def test_scan_order_still_applies_when_unset(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("HF_TOKEN", "h")
+        reset_settings()
+
+        assert get_settings().provider == "groq"
+
+    def test_a_named_provider_without_a_key_does_not_fall_through(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+        reset_settings()
+
+        assert get_settings().provider is None
+
+    def test_an_unknown_provider_name_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setenv("LLM_PROVIDER", "nonsense")
+        reset_settings()
+
+        assert get_settings().provider is None
+
+    def test_the_name_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "h")
+        monkeypatch.setenv("LLM_PROVIDER", "HuggingFace")
+        reset_settings()
+
+        assert get_settings().provider == "huggingface"
+
+
+class TestDefaults:
+    """The dataclass defaults and load_settings' fallbacks must not drift.
+
+    They were separate literals once: editing a field changed what tests build
+    and nothing about what the agent ran, so a 300s timeout stayed 180s in
+    production while the suite stayed green.
+    """
+
+    #: (Settings field, environment variable that overrides it)
+    TUNABLES = (
+        ("temperature", "LLM_TEMPERATURE"),
+        ("llm_timeout_s", "LLM_TIMEOUT_S"),
+        ("llm_max_retries", "LLM_MAX_RETRIES"),
+        ("max_answer_tokens", "MAX_ANSWER_TOKENS"),
+        ("max_supervisor_steps", "MAX_SUPERVISOR_STEPS"),
+        ("max_web_iterations", "MAX_WEB_ITERATIONS"),
+        ("max_code_iterations", "MAX_CODE_ITERATIONS"),
+        ("history_window", "HISTORY_WINDOW"),
+        ("per_question_timeout_s", "PER_QUESTION_TIMEOUT_S"),
+        ("total_budget_s", "TOTAL_BUDGET_S"),
+        ("tokens_per_minute", "TOKENS_PER_MINUTE"),
+        ("max_scrape_chars", "MAX_SCRAPE_CHARS"),
+        ("max_file_chars", "MAX_FILE_CHARS"),
+        ("max_code_output_chars", "MAX_CODE_OUTPUT_CHARS"),
+        ("scrape_timeout_s", "SCRAPE_TIMEOUT_S"),
+        ("sandbox_timeout_s", "SANDBOX_TIMEOUT_S"),
+        ("search_results", "SEARCH_RESULTS"),
+        ("scoring_api_url", "SCORING_API_URL"),
+        ("log_level", "LOG_LEVEL"),
+    )
+
+    def test_a_clean_environment_yields_the_dataclass_defaults(self, monkeypatch):
+        for _, variable in self.TUNABLES:
+            monkeypatch.delenv(variable, raising=False)
+
+        loaded, defaults = load_settings(), Settings()
+
+        for field, _ in self.TUNABLES:
+            assert getattr(loaded, field) == getattr(defaults, field), field
+
+    def test_an_environment_variable_still_wins(self, monkeypatch):
+        """The single source of truth is a fallback, not an override."""
+        monkeypatch.setenv("PER_QUESTION_TIMEOUT_S", "42")
+
+        assert load_settings().per_question_timeout_s == 42.0
+
+    def test_the_budgets_can_accommodate_the_step_budget(self):
+        """A task must be able to finish inside its own timeout.
+
+        4 supervisor steps x 3 specialist iterations is ~12 LLM calls; at the
+        latencies measured against a throttled provider that exceeded 180s, so
+        tasks were killed mid-progress - one of them 95s before it produced the
+        correct answer.
+        """
+        settings = Settings()
+        calls = settings.max_supervisor_steps * settings.max_web_iterations
+
+        assert settings.per_question_timeout_s >= calls * 20.0
+        assert settings.total_budget_s >= settings.per_question_timeout_s
