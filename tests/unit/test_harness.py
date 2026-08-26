@@ -7,6 +7,7 @@ import time
 import pytest
 
 from agent.config import Settings, set_settings
+from agent.core.graph import Solution
 from agent.core.prompts import FINALIZER, NO_ANSWER
 from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
 from agent.obs.metrics import TaskMetric
@@ -284,3 +285,37 @@ class TestNoAnswerSentinel:
         """Guard against the 'give your single best guess anyway' line returning."""
         assert NO_ANSWER in FINALIZER
         assert "best guess" not in FINALIZER.lower()
+
+
+class TestSupervisorSteps:
+    """The delegation count must reach the metric record.
+
+    It was declared on TaskMetric from the start and stayed 0 across all 59
+    recorded runs, because the only way out of the graph returned a bare string.
+    Iteration caps and timeouts should be set from the distribution of
+    successful runs; that distribution was unobservable.
+    """
+
+    def test_a_solution_carries_its_step_count(self):
+        runner = make_runner(lambda _q, _t, _c: Solution(text="42", steps=3))
+
+        metric = runner.run_one(QUESTIONS[0])
+
+        assert metric.answer == "42"
+        assert metric.supervisor_steps == 3
+
+    def test_a_plain_string_still_works_and_reports_no_steps(self):
+        """Injected stubs and any older caller return a bare string."""
+        metric = make_runner(lambda _q, _t, _c: "42").run_one(QUESTIONS[0])
+
+        assert metric.answer == "42"
+        assert metric.supervisor_steps == 0
+
+    def test_a_failure_records_no_steps(self):
+        def boom(*_args):
+            raise RuntimeError("provider down")
+
+        metric = make_runner(boom).run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        assert metric.supervisor_steps == 0

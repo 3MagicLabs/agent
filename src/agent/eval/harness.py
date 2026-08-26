@@ -27,7 +27,12 @@ from agent.obs.tracing import total_tokens, usage_callback
 
 log = get_logger("eval.harness")
 
-AnswerFn = Callable[..., str]
+#: Returns either a bare answer string or an object carrying ``text`` and
+#: ``steps`` (``core.graph.Solution``). Typed loosely on purpose: naming the
+#: concrete type here would mean importing it, and resolving that import late is
+#: what keeps importing this module from building a model client. ``run_one``
+#: reads the result structurally and treats a plain string as zero steps.
+AnswerFn = Callable[..., Any]
 
 #: Floor for a per-task timeout derived from a nearly exhausted total budget.
 MIN_TASK_TIMEOUT_S = 1.0
@@ -156,9 +161,9 @@ class BenchmarkRunner:
     def answer_fn(self) -> AnswerFn:
         """Resolved late so importing the harness never builds a model client."""
         if self._answer_fn is None:
-            from agent.core.graph import answer_question
+            from agent.core.graph import solve_question
 
-            resolved: AnswerFn = answer_question
+            resolved: AnswerFn = solve_question
             self._answer_fn = resolved
         return self._answer_fn
 
@@ -190,14 +195,20 @@ class BenchmarkRunner:
                 task_id,
                 [handler] if handler else None,
             )
-            answer = str(future.result(timeout=limit))
+            result = future.result(timeout=limit)
+            # Read structurally rather than importing Solution: resolving the
+            # answer function late is what keeps importing this module from
+            # building a model client, and an eager import would undo that.
+            # A plain string (what tests inject) reports no steps.
+            answer = str(getattr(result, "text", result))
+            steps = int(getattr(result, "steps", 0))
             status, error = "ok", ""
         except FutureTimeout:
             log.error("[%s] timed out after %.0fs", task_id, limit)
-            answer, status, error = "", "timeout", f"exceeded {limit:.0f}s"
+            answer, steps, status, error = "", 0, "timeout", f"exceeded {limit:.0f}s"
         except Exception as exc:
             log.exception("[%s] failed", task_id)
-            answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
+            answer, steps, status, error = "", 0, "error", f"{type(exc).__name__}: {exc}"
         finally:
             # Never wait: a hung task must not block the rest of the batch.
             executor.shutdown(wait=False)
@@ -215,6 +226,7 @@ class BenchmarkRunner:
             error=error,
             latency_s=round(time.monotonic() - started, 2),
             tokens=total_tokens(handler),
+            supervisor_steps=steps,
             model=self.settings.model,
         )
 

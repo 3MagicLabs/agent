@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -98,6 +99,20 @@ def clean_answer(text: str) -> str:
     if cleaned.endswith(".") and not cleaned.endswith(".."):
         cleaned = cleaned[:-1].strip()
     return cleaned or text.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class Solution:
+    """An answer together with what it cost to reach.
+
+    ``steps`` is the delegation count. It was declared on ``TaskMetric`` from
+    the start but stayed 0 in all 59 recorded runs, because the only way out of
+    the graph returned a bare string and the count lived in state that was
+    thrown away.
+    """
+
+    text: str
+    steps: int = 0
 
 
 class Orchestrator:
@@ -242,18 +257,31 @@ class Orchestrator:
         return builder.compile()
 
     # --- public API ----------------------------------------------------
-    def answer(
+    def solve(
         self, question: str, task_id: str = "local", callbacks: list[Any] | None = None
-    ) -> str:
-        """Run the graph on one question and return the final answer text."""
+    ) -> Solution:
+        """Run the graph on one question and return the answer with its cost.
+
+        ``answer()`` returns only the text, which is all the app and CLI need.
+        The harness needs the delegation count too: iteration caps and timeouts
+        should be set from the distribution of successful runs, and that was
+        unobservable while every metric record reported zero steps.
+        """
         final_state = self.graph.invoke(
             initial_supervisor_state([HumanMessage(content=question)]),
             config=trace_config(task_id, callbacks),
         )
+        steps = int(final_state.get("steps", 0))
         for message in reversed(list(final_state["messages"])):
             if getattr(message, "name", "") == FINAL_ANSWER:
-                return str(message.content).strip()
-        return ""
+                return Solution(text=str(message.content).strip(), steps=steps)
+        return Solution(text="", steps=steps)
+
+    def answer(
+        self, question: str, task_id: str = "local", callbacks: list[Any] | None = None
+    ) -> str:
+        """Run the graph on one question and return the final answer text."""
+        return self.solve(question, task_id=task_id, callbacks=callbacks).text
 
 
 @lru_cache(maxsize=1)
@@ -272,3 +300,10 @@ def answer_question(
 ) -> str:
     """Convenience entry point used by the app, CLI and eval harness."""
     return get_orchestrator().answer(question, task_id=task_id, callbacks=callbacks)
+
+
+def solve_question(
+    question: str, task_id: str = "local", callbacks: list[Any] | None = None
+) -> Solution:
+    """Like answer_question, but keeps the delegation count."""
+    return get_orchestrator().solve(question, task_id=task_id, callbacks=callbacks)
