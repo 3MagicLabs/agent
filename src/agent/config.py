@@ -111,9 +111,24 @@ class Settings:
     #: Read independently of provider resolution: the GAIA dataset is gated,
     #: and its files are needed even when the LLM provider is not HuggingFace.
     hf_token: str = ""
-    max_scrape_chars: int = 6000
-    max_file_chars: int = 12000
-    max_code_output_chars: int = 4000
+    #: How much of a tool's output may enter the transcript. These were sized
+    #: for Groq's 8,000 tokens-per-minute ceiling, where 12,000 characters was
+    #: already most of a minute's allowance. Against Sonnet's 1M context that
+    #: was 0.3% of what fits, and the middle of every document was being thrown
+    #: away for no reason.
+    #:
+    #: The binding constraint is now replay, not context: a specialist resends
+    #: its whole transcript each iteration, so a document costs its size times
+    #: the number of iterations. At $2/1M input, 60,000 characters (~15k tokens)
+    #: replayed three times is about $0.09 - comfortable inside the $0.50
+    #: per-task ceiling.
+    #:
+    #: For data too large to be worth any of this, the answer is not a bigger
+    #: limit or a retrieval index: it is python_repl computing over the file and
+    #: returning the number.
+    max_scrape_chars: int = 30000
+    max_file_chars: int = 60000
+    max_code_output_chars: int = 15000
     scrape_timeout_s: float = 20.0
     sandbox_timeout_s: int = 60
     search_results: int = 3

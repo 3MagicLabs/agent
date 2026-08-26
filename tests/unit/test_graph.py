@@ -19,6 +19,14 @@ from agent.core.graph import (
     routing_prompt,
     trim,
 )
+from agent.core.prompts import (
+    CODE_SPECIALIST,
+    FINALIZER,
+    NO_ANSWER,
+    REASON_SPECIALIST,
+    SUPERVISOR,
+    WEB_SPECIALIST,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -100,7 +108,7 @@ def test_self_contained_questions_are_routed_away_from_the_web(settings):
     """
     prompt = routing_prompt(Orchestrator(settings).specs)
 
-    assert "Prefer 'reason_agent'" in prompt
+    assert "Prefer reason_agent" in " ".join(prompt.split())
     assert "reason_agent" in prompt
 
 
@@ -209,3 +217,65 @@ def test_a_specialist_is_told_what_is_already_downloaded(settings):
     )
 
     assert any("sales.xlsx" in str(m.content) for m in seen["messages"])
+
+
+def _flat(text: str) -> str:
+    """Prompt text with runs of whitespace collapsed.
+
+    Prompts are hard-wrapped, so an assertion on an exact substring breaks
+    whenever a line happens to wrap mid-phrase - which says nothing about
+    whether the instruction is still there.
+    """
+    return " ".join(text.split())
+
+
+class TestPromptInvariants:
+    """Lines that exist because something failed without them.
+
+    A prompt rewrite is easy to do and easy to silently regress, so the
+    load-bearing content is asserted rather than trusted to review.
+    """
+
+    def test_the_finalizer_asks_for_the_sentinel_and_forbids_guessing(self):
+        assert NO_ANSWER in FINALIZER
+        assert "do not guess" in FINALIZER.lower()
+        assert "best guess" not in FINALIZER.lower()
+
+    def test_the_finalizer_states_the_exact_match_format_rules(self):
+        for rule in ("thousands separators", "leading article", "comma-separated"):
+            assert rule in FINALIZER, rule
+
+    def test_character_level_work_is_routed_to_code(self):
+        """Models read tokens, not characters, and get reversal confidently wrong."""
+        assert "character-level" in _flat(SUPERVISOR)
+        assert "code_agent" in SUPERVISOR
+        assert "character-level" in _flat(REASON_SPECIALIST)
+
+    def test_the_supervisor_is_told_to_trust_tool_evidence(self):
+        """Re-verifying an evidenced answer cost four rounds and 34k tokens."""
+        assert "unverified" in SUPERVISOR
+        assert "do NOT delegate again" in _flat(SUPERVISOR)
+
+    def test_the_supervisor_does_not_act_directly(self):
+        assert "never browse" in _flat(SUPERVISOR).lower()
+
+    def test_every_specialist_is_told_not_to_fabricate(self):
+        for prompt in (REASON_SPECIALIST, WEB_SPECIALIST, CODE_SPECIALIST):
+            assert "guess" in prompt.lower() or "never claim" in prompt.lower()
+
+    def test_the_code_specialist_must_actually_run_code(self):
+        assert "never claim a result you did not run" in _flat(CODE_SPECIALIST)
+        assert "print()" in CODE_SPECIALIST
+
+    def test_the_web_specialist_knows_its_reply_is_all_that_survives(self):
+        """The supervisor never reads the pages it fetched."""
+        assert "only thing the supervisor sees" in _flat(WEB_SPECIALIST)
+
+    def test_xml_sections_are_balanced(self):
+        """An unclosed tag turns following instructions into content."""
+        import re
+
+        for prompt in (SUPERVISOR, REASON_SPECIALIST, WEB_SPECIALIST, CODE_SPECIALIST, FINALIZER):
+            opened = re.findall(r"<([a-z_]+)>", prompt)
+            closed = re.findall(r"</([a-z_]+)>", prompt)
+            assert sorted(opened) == sorted(closed), prompt[:40]
