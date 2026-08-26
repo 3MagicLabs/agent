@@ -192,9 +192,20 @@ class TestEffort:
         """It picks one name and writes a sentence; depth buys nothing."""
         assert Settings().router_effort == "low"
 
-    def test_the_specialist_effort_is_unset_by_default(self):
-        """Empty means 'provider default', which is what an A/B starts from."""
-        assert Settings().specialist_effort == ""
+    def test_the_specialist_runs_at_medium(self):
+        """Level-1 tasks are lookups and small computations, not deep
+        reasoning. Set explicitly so a metric records a configuration under
+        test rather than "whatever the provider chose"."""
+        assert Settings().specialist_effort == "medium"
+
+    def test_every_role_has_a_valid_effort(self):
+        """An unknown value is dropped with a warning, so a typo here would
+        silently run at the provider default instead of the intended one."""
+        from agent.core.llm import EFFORTS
+
+        settings = Settings()
+        for role in ("router_effort", "specialist_effort", "finalizer_effort"):
+            assert getattr(settings, role) in EFFORTS, role
 
     def test_effort_is_overridable_for_experiments(self, monkeypatch):
         monkeypatch.setenv("SPECIALIST_EFFORT", "low")

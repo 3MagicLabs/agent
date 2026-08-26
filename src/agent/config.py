@@ -75,8 +75,17 @@ class Settings:
     #: means fewer delegation rounds, and rounds drive the transcript replay
     #: that is 94% of a run's spend. Which setting is right is an empirical
     #: question - run the same tasks at two values and score both.
+    #:
+    #: The router picks one name from a fixed list and writes a sentence; the
+    #: finalizer formats an answer it has already been handed. Neither is
+    #: reasoning, so both run cheap. Specialists carry the actual work, but
+    #: level-1 tasks are lookups and small computations rather than deep
+    #: reasoning, so "medium" rather than the provider's "high". Set
+    #: deliberately rather than left blank: a recorded "medium" is a
+    #: configuration under test, whereas a blank is only "whatever the provider
+    #: chose", which is not a thing an A/B can compare against.
     router_effort: str = "low"
-    specialist_effort: str = ""
+    specialist_effort: str = "medium"
     finalizer_effort: str = "low"
     #: Ceiling for any call that does not bind its own. Anthropic requires
     #: max_tokens at construction, so this is the client-wide default and the
