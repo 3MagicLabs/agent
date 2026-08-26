@@ -63,6 +63,10 @@ Write and run Python to solve the problem.
 #: than with the specialist's own answer, which the model reads as "already done".
 FINALIZER_REQUEST = "Give the final answer now, following the rules exactly."
 
+#: The router's equivalent. Its message list ends with the last specialist's
+#: AIMessage, which Anthropic rejects outright as an assistant prefill.
+ROUTER_REQUEST = "Choose the next specialist, or FINISH if the answer is already above."
+
 FINALIZER = """You are the Answer Formatter. Your output is graded by EXACT MATCH.
 
 Read the conversation and output ONLY the final answer: no preamble, no explanation,
