@@ -116,7 +116,7 @@ disallow_untyped_decorators = false   # langchain's @tool is untyped
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langchain_core.*", "langchain_openai.*", "tavily.*", "e2b_code_interpreter.*", "gradio.*", "bs4.*"]
+module = ["langgraph.*", "langchain_core.*", "langchain_openai.*", "langchain_anthropic.*", "tavily.*", "e2b_code_interpreter.*", "gradio.*", "bs4.*", "pandas.*"]
 ignore_missing_imports = true
 
 # --- pytest -----------------------------------------------------------------

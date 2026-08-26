@@ -2,13 +2,95 @@
 
 The benchmark grades by exact match after normalization, so the normalizer is
 part of the system under test: a correct answer formatted wrongly scores zero.
+
+Reference answers come from the GAIA validation split, which ships them
+alongside the attachments the tools already download. Grading is therefore
+local, instant and free - the alternative is submitting to the leaderboard and
+learning a single percentage with no indication of which tasks failed.
 """
 
 from __future__ import annotations
 
+import io
 import re
 import string
 from dataclasses import dataclass
+
+import requests
+
+from agent.config import get_settings
+from agent.obs.logging import get_logger
+from agent.tools.files import GAIA_DATASET, GAIA_SPLIT
+
+log = get_logger("eval.scorers")
+
+
+class GoldUnavailableError(RuntimeError):
+    """Reference answers could not be loaded.
+
+    Raised rather than returning an empty mapping. An empty gold set scores
+    every run 0/0, which reads as a result instead of a failure to obtain one -
+    the same laundering of an error into a plausible output that this codebase
+    exists to remove.
+    """
+
+
+#: Populated only on success. A failed fetch must not be memoised: one transient
+#: error would otherwise convince the process for its whole lifetime that GAIA
+#: has no reference answers.
+_GOLD: dict[int, dict[str, str]] = {}
+
+
+def gold_answers(level: int = 1) -> dict[str, str]:
+    """task_id -> reference answer for one GAIA validation level.
+
+    Requires ``HF_TOKEN``: the dataset is gated. Reading parquet needs pandas,
+    which is an optional extra, so it is imported lazily and its absence is
+    reported as an actionable message rather than an ImportError traceback.
+    """
+    if level in _GOLD:
+        return _GOLD[level]
+
+    settings = get_settings()
+    if not settings.hf_token:
+        raise GoldUnavailableError(
+            "HF_TOKEN is not set. The GAIA dataset is gated; reference answers "
+            "cannot be fetched without it."
+        )
+
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover - depends on the install extras
+        raise GoldUnavailableError(
+            "Reading the reference answers needs pandas. Install it with "
+            "`pip install -e '.[app]'`."
+        ) from exc
+
+    name = f"metadata.level{level}.parquet"
+    url = f"https://huggingface.co/datasets/{GAIA_DATASET}/resolve/main/{GAIA_SPLIT}/{name}"
+    try:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {settings.hf_token}"},
+            timeout=settings.scrape_timeout_s,
+        )
+        response.raise_for_status()
+        frame = pd.read_parquet(io.BytesIO(response.content))
+    except Exception as exc:
+        raise GoldUnavailableError(f"Could not fetch {name}: {exc}") from exc
+
+    answers = {
+        str(row["task_id"]): str(row["Final answer"])
+        for _, row in frame.iterrows()
+        if row.get("task_id") and row.get("Final answer") is not None
+    }
+    if not answers:
+        raise GoldUnavailableError(f"{name} contained no reference answers.")
+
+    log.info("GAIA level %d reference answers: %d tasks", level, len(answers))
+    _GOLD[level] = answers
+    return answers
+
 
 #: Preambles models habitually emit despite being told not to.
 _PREFIX = re.compile(r"^\s*(final\s+answer\s*:|answer\s*:)\s*", re.IGNORECASE)

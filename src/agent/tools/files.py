@@ -192,7 +192,7 @@ def download_task_file(task_id: str) -> str:
 
 def _read_tabular(path: Path, limit: int) -> str:
     try:
-        import pandas as pd  # type: ignore[import-untyped]
+        import pandas as pd
     except ImportError:  # pragma: no cover - pandas is an app extra
         return f"Cannot parse {path.name}: pandas is not installed."
 
