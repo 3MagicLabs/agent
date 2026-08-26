@@ -185,3 +185,18 @@ class TestDefaults:
 
         assert settings.per_question_timeout_s >= calls * 20.0
         assert settings.total_budget_s >= settings.per_question_timeout_s
+
+
+class TestEffort:
+    def test_the_router_runs_cheap_by_default(self):
+        """It picks one name and writes a sentence; depth buys nothing."""
+        assert Settings().router_effort == "low"
+
+    def test_the_specialist_effort_is_unset_by_default(self):
+        """Empty means 'provider default', which is what an A/B starts from."""
+        assert Settings().specialist_effort == ""
+
+    def test_effort_is_overridable_for_experiments(self, monkeypatch):
+        monkeypatch.setenv("SPECIALIST_EFFORT", "low")
+
+        assert load_settings().specialist_effort == "low"

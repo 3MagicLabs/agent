@@ -24,8 +24,9 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from agent.config import get_settings
 from agent.core.conversation import normalize, text_of
-from agent.core.llm import get_llm
+from agent.core.llm import get_llm, with_effort
 from agent.core.state import SpecialistState
 from agent.obs.logging import get_logger
 
@@ -108,7 +109,9 @@ def build_specialist(
 
         error = ""
         try:
-            model = llm_factory().bind_tools(tool_list) if tool_list else llm_factory()
+            base = llm_factory()
+            paced = with_effort(base, get_settings().specialist_effort)
+            model = paced.bind_tools(tool_list) if tool_list else paced
             response: BaseMessage = model.invoke(normalize(messages))
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s reasoning failed: %s", spec.name, exc)

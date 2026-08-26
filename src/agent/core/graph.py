@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, create_model
 from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
 from agent.core.conversation import normalize, text_of
-from agent.core.llm import get_llm
+from agent.core.llm import get_llm, with_effort
 from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
@@ -146,8 +146,10 @@ class Orchestrator:
         try:
             # Capped like the finalizer: the router emits one schema selection
             # and a short justification, so it never needs a specialist's room.
-            router = get_llm().bind(max_tokens=self.settings.max_router_tokens)
-            router = router.with_structured_output(self._route_model, method="function_calling")
+            capped = get_llm().bind(max_tokens=self.settings.max_router_tokens)
+            router = with_effort(capped, self.settings.router_effort).with_structured_output(
+                self._route_model, method="function_calling"
+            )
             # Typed Any deliberately. with_structured_output declares a
             # non-Optional return, which would make the None check below
             # unreachable - but that is a promise about a well-behaved provider,
@@ -221,7 +223,8 @@ class Orchestrator:
         ]
         # Capped: the answer is a few words, and an uncapped repetition loop
         # once emitted 4,344 tokens of a single sentence repeated.
-        finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
+        capped = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
+        finalizer = with_effort(capped, self.settings.finalizer_effort)
         try:
             # text_of, not str(...content): with thinking enabled the content is
             # a list of typed blocks, and str() over it yields the repr - which

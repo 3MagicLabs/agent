@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -158,6 +160,10 @@ class BenchmarkRunner:
         self.cache = cache or AnswerCache(self.settings.answer_cache)
         self.recorder = recorder or MetricsRecorder(self.settings.metrics_file)
         self._answer_fn = answer_fn
+        # metrics.jsonl is append-only and carried no run id, so a file with
+        # 27 records for 20 tasks gave no way to say which run a record
+        # belonged to - and no way to A/B a configuration change.
+        self.run_id = uuid.uuid4().hex[:8]
 
     @property
     def answer_fn(self) -> AnswerFn:
@@ -224,6 +230,7 @@ class BenchmarkRunner:
             if reason:
                 status, error = "error", reason
 
+        tokens = total_tokens(handler)
         return TaskMetric(
             task_id=task_id,
             question=question,
@@ -231,9 +238,13 @@ class BenchmarkRunner:
             status=status,
             error=error,
             latency_s=round(time.monotonic() - started, 2),
-            tokens=total_tokens(handler),
+            tokens=tokens,
             supervisor_steps=steps,
             model=self.settings.model,
+            run_id=self.run_id,
+            recorded_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            effort=self.settings.specialist_effort or "default",
+            cost_usd=round(cost_of(tokens, self.settings.model), 6),
         )
 
     def pause_for(self, metric: TaskMetric) -> float:
@@ -304,7 +315,7 @@ class BenchmarkRunner:
             # task is already bounded by its timeout, so the job here is to
             # stop the *next* one - and stopping is the point: a spent budget
             # must never quietly become a cheaper, worse run.
-            spend = cost_of(metric.tokens, metric.model)
+            spend = metric.cost_usd
             budget = budget.charge(spend)
             reason = budget.task_overspend(spend) or budget.run_overspend()
             if budget.enabled and reason:

@@ -371,3 +371,49 @@ class TestSpendCeilings:
         # Asserting on structure, not on a substring of a message that
         # embeds a tmp_path named after this very test.
         assert events[-1].message.startswith("Run complete")
+
+
+class TestRunLabelling:
+    """Two runs must be distinguishable in an append-only metrics file."""
+
+    def test_every_task_in_a_run_shares_one_run_id(self):
+        runner = make_runner(lambda _q, _t, _c: "x")
+
+        metrics = [m for e in runner.run(QUESTIONS, reuse_cache=False) if (m := e.metric)]
+
+        assert len({m.run_id for m in metrics}) == 1
+        assert metrics[0].run_id
+
+    def test_two_runs_get_different_ids(self):
+        """Without this an A/B writes both arms into one undifferentiated file."""
+        first = make_runner(lambda _q, _t, _c: "x").run_id
+        second = make_runner(lambda _q, _t, _c: "x").run_id
+
+        assert first != second
+
+    def test_a_record_carries_the_configuration_under_test(self, settings):
+        tuned = replace(settings, specialist_effort="low")
+        runner = make_runner(lambda _q, _t, _c: "x", settings=tuned)
+
+        metric = runner.run_one(QUESTIONS[0])
+
+        assert metric.effort == "low"
+
+    def test_an_unset_effort_is_recorded_as_the_default(self, settings):
+        """Blank would be ambiguous with 'this run predates the field'."""
+        plain = replace(settings, specialist_effort="")
+
+        assert (
+            make_runner(lambda _q, _t, _c: "x", settings=plain).run_one(QUESTIONS[0]).effort
+            == "default"
+        )
+
+    def test_a_record_is_timestamped(self):
+        metric = make_runner(lambda _q, _t, _c: "x").run_one(QUESTIONS[0])
+
+        assert metric.recorded_at.startswith("20")
+
+    def test_cost_is_recorded_per_task(self, settings, monkeypatch):
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.0470)
+
+        assert make_runner(lambda _q, _t, _c: "x").run_one(QUESTIONS[0]).cost_usd == 0.047

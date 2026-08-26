@@ -7,9 +7,10 @@ design) meant a missing key crashed the whole application before it started.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
 from agent.config import PROVIDER_KEYS, Settings, get_settings
@@ -59,6 +60,33 @@ def build_llm(settings: Settings | None = None) -> BaseChatModel:
         kwargs["base_url"] = resolved.base_url
 
     return ChatOpenAI(**kwargs)
+
+
+#: Values Anthropic accepts for reasoning effort. Anything else is ignored
+#: rather than sent, so a typo degrades to the provider default instead of
+#: failing every call in a run.
+EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+#: Bound to Runnable so ``.bind`` is known, and generic so the caller keeps
+#: its concrete type - annotating this as Runnable erased ``bind_tools`` and
+#: ``with_structured_output`` from everything it touched.
+M = TypeVar("M", bound=Runnable[Any, Any])
+
+
+def with_effort(model: M, effort: str) -> M:
+    """Bind a reasoning effort, when the provider has one and it is valid.
+
+    Non-Anthropic providers have no equivalent knob, so binding the field would
+    be sent as an unknown parameter. Callers can therefore ask for an effort
+    unconditionally and get the right thing per provider.
+    """
+    if effort not in EFFORTS:
+        if effort:
+            log.warning("ignoring unknown reasoning effort %r", effort)
+        return model
+    if get_settings().provider != "anthropic":
+        return model
+    return cast(M, model.bind(reasoning_effort=effort))
 
 
 @lru_cache(maxsize=1)

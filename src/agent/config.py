@@ -66,6 +66,18 @@ class Settings:
     #: adaptive thinking, and a cap that truncates mid-thought yields a
     #: malformed structured output rather than a cheaper one.
     max_router_tokens: int = 512
+    #: Anthropic reasoning effort, one of low|medium|high|xhigh|max. Empty
+    #: uses the provider default (high) and is what non-Anthropic providers
+    #: get, since they have no equivalent knob.
+    #:
+    #: Lower effort means fewer and more-consolidated tool calls, which is
+    #: why this is worth more than its effect on output tokens: fewer calls
+    #: means fewer delegation rounds, and rounds drive the transcript replay
+    #: that is 94% of a run's spend. Which setting is right is an empirical
+    #: question - run the same tasks at two values and score both.
+    router_effort: str = "low"
+    specialist_effort: str = ""
+    finalizer_effort: str = "low"
     #: Ceiling for any call that does not bind its own. Anthropic requires
     #: max_tokens at construction, so this is the client-wide default and the
     #: finalizer narrows it per call. It must fit a specialist's reasoning plus
@@ -198,6 +210,9 @@ def load_settings() -> Settings:
         llm_max_retries=_env_int("LLM_MAX_RETRIES", _DEFAULTS.llm_max_retries),
         max_answer_tokens=_env_int("MAX_ANSWER_TOKENS", _DEFAULTS.max_answer_tokens),
         max_router_tokens=_env_int("MAX_ROUTER_TOKENS", _DEFAULTS.max_router_tokens),
+        router_effort=os.getenv("ROUTER_EFFORT", _DEFAULTS.router_effort),
+        specialist_effort=os.getenv("SPECIALIST_EFFORT", _DEFAULTS.specialist_effort),
+        finalizer_effort=os.getenv("FINALIZER_EFFORT", _DEFAULTS.finalizer_effort),
         max_supervisor_steps=_env_int("MAX_SUPERVISOR_STEPS", _DEFAULTS.max_supervisor_steps),
         max_web_iterations=_env_int("MAX_WEB_ITERATIONS", _DEFAULTS.max_web_iterations),
         max_code_iterations=_env_int("MAX_CODE_ITERATIONS", _DEFAULTS.max_code_iterations),
