@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from tests.conftest import ToolCallingLLM
 
 from agent.agents.base import (
     SpecialistSpec,
@@ -168,13 +169,20 @@ class TestToollessEvidence:
 
 
 class TestWrapUp:
-    """Work done but never reported is work paid for twice."""
+    """Work done but never reported is work paid for twice.
+
+    These drive a specialist with a stub that really emits tool calls and really
+    enforces the provider's message rules. Asserting on the returned *text* is
+    not enough: summarize catches every exception and substitutes "ran out of
+    steps before reporting", so a contract violation reads exactly like an
+    honest budget exhaustion - which is how the same 400 shipped twice.
+    """
 
     def test_a_capped_specialist_still_reports(self):
-        """Hitting the cap used to end the subgraph outright, so a specialist
+        """Hitting the budget used to end the subgraph outright, so a specialist
         that had downloaded, read and computed had no turn left to say what it
         found - and the supervisor re-delegated the whole job."""
-        llm = StubLLM(reply="I established the total is 89706.00")
+        llm = ToolCallingLLM(script=["read_file"], reply="the total is 89706.00")
 
         result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
             initial()
@@ -182,8 +190,30 @@ class TestWrapUp:
 
         assert "89706.00" in last_text(list(result["messages"]))
 
+    def test_the_wrap_up_conversation_is_well_formed(self):
+        """The assertion that matters is on what was SENT, not what came back."""
+        llm = ToolCallingLLM(script=["read_file"], reply="done")
+
+        build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(initial())
+
+        final = llm.calls[-1]
+        resolved = {m.tool_call_id for m in final if isinstance(m, ToolMessage)}
+        for message in final:
+            for call in getattr(message, "tool_calls", None) or []:
+                assert str(call["id"]) in resolved, "an unrun tool call reached the provider"
+
+    def test_the_wrap_up_did_not_silently_fail(self):
+        """ "ran out of steps" is the fallback that hid two shipped 400s."""
+        llm = ToolCallingLLM(script=["read_file"], reply="the total is 89706.00")
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "ran out of steps" not in last_text(list(result["messages"]))
+
     def test_the_wrap_up_turn_is_told_not_to_call_tools(self):
-        llm = StubLLM(reply="done")
+        llm = ToolCallingLLM(script=["read_file"], reply="done")
 
         build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(initial())
 
@@ -197,3 +227,33 @@ class TestWrapUp:
         )
 
         assert "ran out of steps" in last_text(list(result["messages"]))
+
+
+class TestBudgetCountsToolCalls:
+    """The budget bounds tool calls, not thoughts.
+
+    Counting every reasoning turn meant a tool call and the thought producing it
+    each cost one, so six turns bought five tools and nothing to report with -
+    the whole reason the summarize node had to be written.
+    """
+
+    def test_an_answer_without_tools_costs_nothing(self):
+        llm = ToolCallingLLM(script=[], reply="42")
+
+        result = build_specialist(make_spec(max_iterations=3), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert result["iterations"] == 0
+        assert len(llm.calls) == 1
+
+    def test_a_finished_specialist_is_not_sent_to_wrap_up(self):
+        """It answered on its last allowed turn; summarising replaces a good
+        answer with a paraphrase of itself."""
+        llm = ToolCallingLLM(script=["read_file"], reply="the answer")
+
+        build_specialist(make_spec(max_iterations=2), llm_factory=lambda: llm).invoke(initial())
+
+        assert not any(
+            "do not call any more tools" in str(c[-1].content).lower() for c in llm.calls
+        )

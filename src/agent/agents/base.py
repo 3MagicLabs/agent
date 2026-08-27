@@ -95,13 +95,18 @@ def last_text(messages: Sequence[BaseMessage], default: str = "(no output produc
 
 def build_specialist(
     spec: SpecialistSpec,
-    llm_factory: Callable[[], Any] = get_llm,
+    llm_factory: Callable[[], Any] | None = None,
 ) -> Any:
     """Compile a ReAct subgraph for one specialist.
 
-    ``llm_factory`` is injected rather than imported so tests can substitute a
-    stub without patching module globals.
+    ``llm_factory`` is injected so tests can substitute a stub. It defaults to
+    None rather than to ``get_llm`` because a default argument is bound at
+    import time: with ``= get_llm`` the orchestrator captured the original
+    function, so patching the module attribute reached the supervisor and
+    silently missed every specialist. Half the graph was unstubable and the
+    docstring claimed otherwise.
     """
+    resolve: Callable[[], Any] = llm_factory if llm_factory is not None else lambda: get_llm()
     system_message = SystemMessage(content=spec.prompt)
     tool_list = list(spec.tools)
 
@@ -118,7 +123,7 @@ def build_specialist(
 
         error = ""
         try:
-            base = llm_factory()
+            base = resolve()
             paced = with_effort(base, get_settings().specialist_effort)
             model = paced.bind_tools(tool_list) if tool_list else paced
             response: BaseMessage = model.invoke(normalize(messages))
@@ -129,7 +134,16 @@ def build_specialist(
             error = str(exc)
             response = AIMessage(content=f"{spec.name} failed: {exc}")
 
-        return {"messages": [response], "iterations": 1, "last_error": error}
+        # The budget counts tool-CALLING turns. Counting every reasoning turn
+        # meant a tool call and the thought that produced it each cost one, so
+        # six turns bought five tools and left nothing to report with - which
+        # is the whole reason the summarize node had to exist. A turn that
+        # produces an answer is free.
+        # A failed turn spends budget too, or the retry path never terminates:
+        # a provider failing every call emits no tool calls, so counting only
+        # those would loop until the recursion limit.
+        spent = 1 if (getattr(response, "tool_calls", None) or error) else 0
+        return {"messages": [response], "iterations": spent, "last_error": error}
 
     def summarize(state: SpecialistState) -> dict[str, Any]:
         """One last turn, without tools, so work already done gets reported.
@@ -146,25 +160,33 @@ def build_specialist(
             HumanMessage(content=SPECIALIST_WRAP_UP),
         ]
         try:
-            response: BaseMessage = llm_factory().invoke(normalize(messages))
+            response: BaseMessage = resolve().invoke(normalize(messages))
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s could not summarise: %s", spec.name, exc)
             response = AIMessage(content=f"{spec.name} ran out of steps before reporting.")
         return {"messages": [response], "iterations": 0, "last_error": ""}
 
     def route(state: SpecialistState) -> str:
-        """Continue to tools, retry a failed call, or wrap up on the budget."""
+        """Continue to tools, retry a failed call, or wrap up on the budget.
+
+        Finished is checked BEFORE out-of-budget. The other order sent a
+        specialist that had just produced its answer on its last allowed turn
+        off to summarize anyway - an extra call that replaced a good answer
+        with a paraphrase of itself.
+        """
+        wants_tools = bool(getattr(state["messages"][-1], "tool_calls", None))
+        if not wants_tools and not state.get("last_error"):
+            return END
+
         if state.get("iterations", 0) >= spec.max_iterations:
             log.warning(
-                "%s hit its iteration cap (%d) - summarising.", spec.name, spec.max_iterations
+                "%s hit its tool budget (%d) - summarising.", spec.name, spec.max_iterations
             )
             return "summarize"
         if state.get("last_error"):
             log.info("%s retrying after: %s", spec.name, state["last_error"][:120])
             return "reason"
-        if getattr(state["messages"][-1], "tool_calls", None):
-            return "tools"
-        return END
+        return "tools"
 
     builder: StateGraph[SpecialistState] = StateGraph(SpecialistState)
     builder.add_node("reason", reason)

@@ -134,12 +134,22 @@ def drop_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessag
     }
 
     kept: list[BaseMessage] = []
+    still_requested: set[str] = set()
     for message in messages:
-        requested = getattr(message, "tool_calls", None) or []
-        if requested and not all(str(call.get("id")) in resolved for call in requested):
+        requested = [str(call.get("id")) for call in getattr(message, "tool_calls", None) or []]
+        if requested and not all(call in resolved for call in requested):
             continue
+        still_requested.update(requested)
         kept.append(message)
-    return kept
+
+    # Dropping a request orphans its results, which is the mirror-image
+    # rejection: a tool_result with no preceding tool_use. Removing only one
+    # half of a pair trades one 400 for another.
+    return [
+        message
+        for message in kept
+        if not isinstance(message, ToolMessage) or message.tool_call_id in still_requested
+    ]
 
 
 def normalize(messages: Sequence[BaseMessage], request: str = CONTINUE) -> list[BaseMessage]:

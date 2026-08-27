@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -173,3 +173,81 @@ def failing_llm(monkeypatch):
         return llm
 
     return _install
+
+
+class ContractViolationError(RuntimeError):
+    """What the provider returns as a 400 for a malformed conversation."""
+
+
+class ToolCallingLLM:
+    """A stub that emits tool calls AND enforces the provider's message rules.
+
+    Every other stub here models a *cooperative* provider: it returns text and
+    inspects nothing. That is why an entire class of bug was invisible - the
+    real provider is the only component that enforces the rules
+    ``core.conversation`` exists to satisfy, so a call site could violate them
+    and every test still passed. Four bugs shipped that way, two of them twice.
+
+    ``script`` is a list of tool names to request, one per call; after it is
+    exhausted the stub answers with ``reply``. Set ``validate=False`` to check
+    that a rule really is what fails a test.
+    """
+
+    def __init__(
+        self,
+        script: Sequence[str] = (),
+        reply: str = "done",
+        validate: bool = True,
+    ) -> None:
+        self.script = list(script)
+        self.reply = reply
+        self.validate = validate
+        self.calls: list[list[BaseMessage]] = []
+        self._issued = 0
+
+    def bind_tools(self, _tools: Any, **_kwargs: Any) -> ToolCallingLLM:
+        return self
+
+    def bind(self, **_kwargs: Any) -> ToolCallingLLM:
+        return self
+
+    def _check(self, messages: Sequence[BaseMessage]) -> None:
+        """The three rules the real provider rejects a request for."""
+        systems = [i for i, m in enumerate(messages) if isinstance(m, SystemMessage)]
+        if len(systems) > 1:
+            raise ContractViolationError("Received multiple non-consecutive system messages.")
+        if systems and systems[0] != 0:
+            raise ContractViolationError("A system message must lead the conversation.")
+
+        if messages and isinstance(messages[-1], AIMessage):
+            raise ContractViolationError("This model does not support assistant message prefill.")
+
+        resolved = {
+            m.tool_call_id for m in messages if isinstance(m, ToolMessage) and m.tool_call_id
+        }
+        requested: set[str] = set()
+        for message in messages:
+            for call in getattr(message, "tool_calls", None) or []:
+                identifier = str(call.get("id"))
+                requested.add(identifier)
+                if identifier not in resolved:
+                    raise ContractViolationError(
+                        f"`tool_use` ids were found without `tool_result` blocks "
+                        f"immediately after: {identifier}"
+                    )
+        for orphan in resolved - requested:
+            raise ContractViolationError(f"`tool_result` block with no `tool_use`: {orphan}")
+
+    def invoke(self, messages: Sequence[BaseMessage], **_kwargs: Any) -> AIMessage:
+        self.calls.append(list(messages))
+        if self.validate:
+            self._check(messages)
+
+        if self._issued < len(self.script):
+            name = self.script[self._issued]
+            self._issued += 1
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": name, "args": {}, "id": f"call-{self._issued}"}],
+            )
+        return AIMessage(content=self.reply)

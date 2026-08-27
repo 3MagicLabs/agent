@@ -280,8 +280,12 @@ class TestDanglingCallsByPairing:
 
         assert drop_dangling_tool_calls(messages) == messages
 
-    def test_a_partially_resolved_request_is_dropped(self):
-        """One tool_use without its result invalidates the whole message."""
+    def test_a_partially_resolved_request_takes_its_orphans_with_it(self):
+        """One tool_use without its result invalidates the whole message - and
+        dropping the request orphans the sibling result, which is the
+        mirror-image rejection. Removing one half of a pair trades one 400
+        for another; the first version of this test asserted the orphan
+        should survive."""
         asking_twice = AIMessage(
             content="",
             tool_calls=[
@@ -295,7 +299,7 @@ class TestDanglingCallsByPairing:
             ToolMessage(content="only one", tool_call_id="t1"),
         ]
 
-        assert drop_dangling_tool_calls(messages) == [messages[0], messages[2]]
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
 
     def test_the_wrap_up_shape_that_failed_in_production(self):
         """system, transcript ending in an unrun call, then the wrap-up request."""

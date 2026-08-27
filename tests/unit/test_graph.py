@@ -437,3 +437,60 @@ class TestRefusalIsNotRepeated:
         )
 
         assert state["next_agent"] == "code_agent"
+
+
+class TestWiring:
+    """Arguments actually reaching the thing that needs them.
+
+    Three mutations were shown to reintroduce shipped bugs verbatim while the
+    whole suite stayed green: hardcoding has_tools=True, calling
+    downloaded_inventory() unscoped, and passing "" as the task id. Every bug in
+    this project bar one was a wiring bug, and the suite tests pure functions.
+    """
+
+    def _seeded_text(self, llm) -> str:
+        """Everything the specialist was actually shown."""
+        return "\n".join(str(m.content) for call in llm.calls for m in call)
+
+    def test_a_toolless_specialist_reaches_the_supervisor_as_such(self, settings, stub_llm):
+        """Closes has_tools=True. The function is tested directly; the argument
+        that decides it was not."""
+        stub_llm(reply="b, e")
+        node = Orchestrator(settings)._make_specialist_node("reason_agent")
+
+        emitted = node({"messages": [HumanMessage(content="q")], "task_id": "t1"})
+        text = str(emitted["messages"][0].content)
+
+        assert "no tools by design" in text
+        assert "unverified" not in text
+
+    def test_a_specialist_is_not_offered_another_tasks_files(self, settings, stub_llm):
+        """Closes the unscoped inventory. The pre-existing test asserted only
+        that the right file was PRESENT - absence is the whole property."""
+        llm = stub_llm(reply="ok")
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "mine1111.xlsx").write_bytes(b"x")
+        (root / "theirs2222.py").write_bytes(b"y")
+
+        node = Orchestrator(settings)._make_specialist_node("code_agent")
+        node({"messages": [HumanMessage(content="q")], "task_id": "mine1111"})
+
+        shown = self._seeded_text(llm)
+        assert "mine1111.xlsx" in shown
+        assert "theirs2222.py" not in shown
+
+    def test_solve_threads_its_task_id_to_the_specialist(self, settings, stub_llm):
+        """Closes passing "" as the task id, which silently unscopes every
+        task-local behaviour downstream."""
+        llm = stub_llm(reply="ok", route_to="code_agent")
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "mine1111.xlsx").write_bytes(b"x")
+        (root / "theirs2222.py").write_bytes(b"y")
+
+        Orchestrator(settings).solve("q", task_id="mine1111")
+
+        shown = self._seeded_text(llm)
+        assert "mine1111.xlsx" in shown
+        assert "theirs2222.py" not in shown
