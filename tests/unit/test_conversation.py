@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agent.core.conversation import (
     CONTINUE,
     as_data,
+    drop_dangling_tool_calls,
     ends_with_request,
     merge_system,
     normalize,
@@ -194,3 +195,50 @@ class TestAsData:
         messages = [SystemMessage(content="rules")]
 
         assert as_data(messages) == messages
+
+
+class TestDropDanglingToolCalls:
+    """Every tool_use must be followed by its tool_result, or the request 400s.
+
+    A specialist that exhausts its budget mid-decision leaves exactly that
+    shape: the model asked for a tool, the loop stopped before running it. The
+    wrap-up turn then crashed on "`tool_use` ids were found without
+    `tool_result` blocks immediately after" every time it was needed.
+    """
+
+    def _asking(self) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "t1"}],
+        )
+
+    def test_an_unresolved_trailing_request_is_dropped(self):
+        messages = [HumanMessage(content="q"), self._asking()]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
+
+    def test_a_resolved_request_is_kept(self):
+        """It has its result, so the pairing the provider requires is intact."""
+        messages = [
+            HumanMessage(content="q"),
+            self._asking(),
+            ToolMessage(content="contents", tool_call_id="t1"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_several_dangling_requests_are_all_dropped(self):
+        messages = [HumanMessage(content="q"), self._asking(), self._asking()]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
+
+    def test_ordinary_messages_are_untouched(self):
+        messages = [HumanMessage(content="q"), AIMessage(content="an answer")]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_normalize_applies_it(self):
+        """The wrap-up turn goes through normalize, which is where it must bite."""
+        shaped = normalize([HumanMessage(content="q"), self._asking()])
+
+        assert not any(getattr(m, "tool_calls", None) for m in shaped)

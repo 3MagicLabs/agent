@@ -107,6 +107,27 @@ def as_data(messages: Sequence[BaseMessage], tag: str = "task") -> list[BaseMess
     return conversation
 
 
+def drop_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Remove trailing tool calls that were never executed.
+
+    Anthropic requires every ``tool_use`` block to be followed immediately by
+    its ``tool_result``: otherwise the request is rejected outright with
+    "`tool_use` ids were found without `tool_result` blocks immediately
+    after".
+
+    A specialist that exhausts its iteration budget mid-decision leaves
+    exactly that shape - the model asked for a tool, the loop stopped before
+    running it - so the wrap-up turn crashed on a 400 every time it was
+    needed. The requests are dropped rather than answered with synthetic
+    results: they did not run, and inventing results would be a lie the model
+    then reasons from.
+    """
+    conversation = list(messages)
+    while conversation and getattr(conversation[-1], "tool_calls", None):
+        conversation.pop()
+    return conversation
+
+
 def normalize(messages: Sequence[BaseMessage], request: str = CONTINUE) -> list[BaseMessage]:
     """Shape a message list so any supported provider will accept it."""
-    return ends_with_request(merge_system(messages), request)
+    return ends_with_request(drop_dangling_tool_calls(merge_system(messages)), request)

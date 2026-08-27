@@ -208,6 +208,13 @@ class Orchestrator:
 
             category = refusal_category((result or {}).get("raw"))
             if category:
+                # Once only. The refusal is on the task text, which does not
+                # change between rounds, so a fallback that can fire again
+                # simply re-routes to the same specialist until the budget
+                # runs out - measured, four identical rounds.
+                if step > 0:
+                    log.error("Routing declined by policy (%s) again - finishing.", category)
+                    return {"next_agent": FINISH, "steps": 1}
                 target = self._refusal_route()
                 log.warning(
                     "Routing declined by policy (%s) - sending to %s unclassified.",

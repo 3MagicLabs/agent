@@ -13,6 +13,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.core.graph import (
+    FINISH,
     Orchestrator,
     build_route_model,
     clean_answer,
@@ -397,3 +398,22 @@ class TestRefusal:
 
         assert llm.router is not None
         assert llm.router.calls == 1
+
+
+class TestRefusalIsNotRepeated:
+    def test_the_fallback_fires_once(self, settings, stub_llm):
+        """The refusal is on the task text, which does not change between
+        rounds - so a fallback that can fire again re-routes to the same
+        specialist until the budget runs out. Measured: four identical rounds."""
+        stub_llm(refusal="general_harms")
+        orchestrator = Orchestrator(settings)
+
+        first = orchestrator._supervise(
+            {"messages": [HumanMessage(content="reversed")], "steps": 0}
+        )
+        later = orchestrator._supervise(
+            {"messages": [HumanMessage(content="reversed")], "steps": 1}
+        )
+
+        assert first["next_agent"] == "code_agent"
+        assert later["next_agent"] == FINISH
