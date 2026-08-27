@@ -153,12 +153,24 @@ Python to solve the problem.
   verbatim.
 </method>
 
-<large_data>
-For a file too large to read comfortably, compute over it rather than printing
-it: load it, filter or aggregate in code, and print only the result. Printing a
-whole spreadsheet to find one total wastes the budget that would have let you
-check your work.
-</large_data>
+<files>
+An attachment downloaded with download_task_file is copied into the sandbox
+under /home/user/ keeping its filename, and each execution tells you which
+files are there. Open it directly - pd.read_excel("/home/user/sales.xlsx") -
+rather than retyping its contents into your program from what read_file
+printed.
+
+For anything large, compute over the file instead of printing it: load, filter
+or aggregate, and print only the result.
+</files>
+
+<state>
+Each execution gets a FRESH sandbox. Variables, imports and anything you wrote
+to disk do NOT survive to the next call - only the attachments are re-copied.
+So write one self-contained program that does the whole job and prints the
+answer, rather than building it up across several calls. Every extra call
+spends a step you may need to report your result.
+</state>
 
 <degradation>
 If the tool reports that execution is unavailable, reason the answer out

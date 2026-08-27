@@ -45,7 +45,7 @@ BINARY_HINTS = {
 }
 
 
-def _download_dir() -> Path:
+def download_dir() -> Path:
     target = get_settings().download_dir
     target.mkdir(parents=True, exist_ok=True)
     return target
@@ -53,7 +53,7 @@ def _download_dir() -> Path:
 
 def _resolve(path: str) -> Path | None:
     """Resolve a model-supplied path, refusing anything outside the download dir."""
-    root = _download_dir().resolve()
+    root = download_dir().resolve()
     candidate = (root / Path(path).name).resolve()
     if candidate.parent != root or not candidate.exists():
         return None
@@ -63,7 +63,7 @@ def _resolve(path: str) -> Path | None:
 def _existing_download(task_id: str) -> Path | None:
     """A previously fetched attachment for this task, if any."""
     try:
-        matches = sorted(p for p in _download_dir().glob(f"{task_id}*") if p.is_file())
+        matches = sorted(p for p in download_dir().glob(f"{task_id}*") if p.is_file())
     except OSError:
         return None
     return matches[0] if matches else None
@@ -87,7 +87,7 @@ def downloaded_inventory(task_id: str = "") -> str:
     try:
         entries = sorted(
             p
-            for p in _download_dir().iterdir()
+            for p in download_dir().iterdir()
             if p.is_file() and (not task_id or p.name.startswith(task_id))
         )
     except OSError:
@@ -206,7 +206,7 @@ def download_task_file(task_id: str) -> str:
         )
 
     content, suffix = payload
-    destination = _download_dir() / f"{task_id}{suffix}"
+    destination = download_dir() / f"{task_id}{suffix}"
     destination.write_bytes(content)
     log.info("saved %d bytes -> %s", len(content), destination)
     return f"Downloaded to {destination} ({len(content)} bytes). Now call read_file on it."
@@ -253,7 +253,7 @@ def read_file(path: str) -> str:
 
     resolved = _resolve(path)
     if resolved is None:
-        available = [p.name for p in _download_dir().iterdir()] or ["(none)"]
+        available = [p.name for p in download_dir().iterdir()] or ["(none)"]
         return f"No such downloaded file: {path}. Available: {available}"
 
     suffix = resolved.suffix.lower()
@@ -270,7 +270,7 @@ def read_file(path: str) -> str:
 def list_downloaded_files() -> str:
     """List files already downloaded during this run, with their sizes."""
     entries = [
-        {"name": p.name, "bytes": p.stat().st_size} for p in sorted(_download_dir().iterdir())
+        {"name": p.name, "bytes": p.stat().st_size} for p in sorted(download_dir().iterdir())
     ]
     return json.dumps(entries) if entries else "No files downloaded yet."
 

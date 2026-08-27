@@ -20,6 +20,53 @@ from agent.tools.text import elide
 log = get_logger("tools.code")
 
 
+#: Where downloaded attachments appear inside the sandbox.
+SANDBOX_DIR = "/home/user"
+
+
+def _upload_attachments(sandbox: Any) -> list[str]:
+    """Copy downloaded attachments into the sandbox, returning their paths.
+
+    The download directory is on *this* machine; the sandbox is a remote
+    container that cannot see it. Without this the specialist could only work
+    from whatever ``read_file`` had rendered into the transcript, so a
+    spreadsheet had to be retyped into the source of every program that touched
+    it - which is why summing one column took three separate executions.
+
+    A fresh sandbox is created per call, so this runs per call too. Failures are
+    logged and skipped: code that does not need the file must still run.
+    """
+    writer = getattr(getattr(sandbox, "files", None), "write", None)
+    if writer is None:  # pragma: no cover - older SDKs expose no filesystem
+        return []
+
+    from agent.tools.files import download_dir
+
+    uploaded: list[str] = []
+    try:
+        entries = sorted(p for p in download_dir().iterdir() if p.is_file())
+    except OSError:
+        return []
+
+    for path in entries:
+        target = f"{SANDBOX_DIR}/{path.name}"
+        try:
+            writer(target, path.read_bytes())
+        except Exception as exc:  # noqa: BLE001 - the program may not need it
+            log.warning("could not upload %s to the sandbox: %s", path.name, exc)
+            continue
+        uploaded.append(target)
+    return uploaded
+
+
+def _prefix_uploads(output: str, uploaded: list[str]) -> str:
+    """Tell the model where its files are, since it cannot list them itself."""
+    if not uploaded:
+        return output
+    listing = ", ".join(uploaded)
+    return f"[attachments available in the sandbox: {listing}]\n{output}"
+
+
 def _load_sandbox_class() -> Any:
     """Return the installed E2B sandbox class, raising ImportError if absent."""
     import e2b_code_interpreter as e2b
@@ -114,8 +161,9 @@ def python_repl(code: str) -> str:
     sandbox = None
     try:
         sandbox = _open_sandbox(sandbox_cls, int(settings.sandbox_timeout_s))
+        uploaded = _upload_attachments(sandbox)
         execution = _execute(sandbox, code, timeout_s=settings.sandbox_timeout_s)
-        return _render(execution, settings.max_code_output_chars)
+        return _prefix_uploads(_render(execution, settings.max_code_output_chars), uploaded)
     except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
         log.error("Sandbox execution failed: %s", exc)
         return f"System Error connecting to sandbox: {exc}"
