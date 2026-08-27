@@ -165,6 +165,17 @@ If the tool reports that execution is unavailable, reason the answer out
 directly and say that you could not run code.
 </degradation>"""
 
+#: Sent when a specialist exhausts its iteration budget. Hitting the cap used
+#: to end its subgraph outright, so one that had downloaded, read and computed
+#: had no turn left to say what it found - the supervisor saw a tool call with
+#: empty content, concluded "no output/printed result", and re-delegated the
+#: whole job.
+SPECIALIST_WRAP_UP = (
+    "You have used your tool budget. Report what you established, in a sentence "
+    "or two, from what is already above - do not call any more tools. If you did "
+    "not establish the answer, say so plainly rather than offering a guess."
+)
+
 #: Sent as the final user turn so the conversation ends with a request rather
 #: than with the specialist's own answer, which the model reads as "already done".
 FINALIZER_REQUEST = "Give the final answer now, following the rules exactly."

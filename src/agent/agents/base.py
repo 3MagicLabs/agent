@@ -27,6 +27,7 @@ from langgraph.prebuilt import ToolNode
 from agent.config import get_settings
 from agent.core.conversation import normalize, text_of
 from agent.core.llm import get_llm, with_effort
+from agent.core.prompts import SPECIALIST_WRAP_UP
 from agent.core.state import SpecialistState
 from agent.obs.logging import get_logger
 
@@ -130,11 +131,34 @@ def build_specialist(
 
         return {"messages": [response], "iterations": 1, "last_error": error}
 
+    def summarize(state: SpecialistState) -> dict[str, Any]:
+        """One last turn, without tools, so work already done gets reported.
+
+        The cap counts reasoning turns and every tool call consumes one, so a
+        specialist that downloaded, read and computed reached the ceiling with
+        nothing left to say what it found. The supervisor then saw a tool call
+        with empty content, concluded no answer had been produced, and
+        re-delegated - repeating the whole job at full price.
+        """
+        messages: list[BaseMessage] = [
+            system_message,
+            *state["messages"],
+            HumanMessage(content=SPECIALIST_WRAP_UP),
+        ]
+        try:
+            response: BaseMessage = llm_factory().invoke(normalize(messages))
+        except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
+            log.error("%s could not summarise: %s", spec.name, exc)
+            response = AIMessage(content=f"{spec.name} ran out of steps before reporting.")
+        return {"messages": [response], "iterations": 0, "last_error": ""}
+
     def route(state: SpecialistState) -> str:
-        """Continue to tools, retry a failed call, or stop on the budget."""
+        """Continue to tools, retry a failed call, or wrap up on the budget."""
         if state.get("iterations", 0) >= spec.max_iterations:
-            log.warning("%s hit its iteration cap (%d) - stopping.", spec.name, spec.max_iterations)
-            return END
+            log.warning(
+                "%s hit its iteration cap (%d) - summarising.", spec.name, spec.max_iterations
+            )
+            return "summarize"
         if state.get("last_error"):
             log.info("%s retrying after: %s", spec.name, state["last_error"][:120])
             return "reason"
@@ -148,10 +172,14 @@ def build_specialist(
 
     if tool_list:
         builder.add_node("tools", ToolNode(tool_list))
+        builder.add_node("summarize", summarize)
         builder.add_conditional_edges(
-            "reason", route, {"tools": "tools", "reason": "reason", END: END}
+            "reason",
+            route,
+            {"tools": "tools", "reason": "reason", "summarize": "summarize", END: END},
         )
         builder.add_edge("tools", "reason")
+        builder.add_edge("summarize", END)
     else:
         builder.add_edge("reason", END)
 

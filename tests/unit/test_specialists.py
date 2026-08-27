@@ -7,7 +7,12 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from agent.agents.base import SpecialistSpec, build_specialist, tool_evidence
+from agent.agents.base import (
+    SpecialistSpec,
+    build_specialist,
+    last_text,
+    tool_evidence,
+)
 from agent.tools import get_tools
 
 pytestmark = pytest.mark.unit
@@ -28,6 +33,21 @@ class FlakyLLM:
         if len(self.calls) <= self.failures:
             raise RuntimeError("tool_use_failed: malformed function call")
         return AIMessage(content="42")
+
+
+class StubLLM:
+    """Always answers, never calls tools."""
+
+    def __init__(self, reply: str = "ok") -> None:
+        self.reply = reply
+        self.calls: list[list[BaseMessage]] = []
+
+    def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
+        return self
+
+    def invoke(self, messages: list[BaseMessage]) -> AIMessage:
+        self.calls.append(list(messages))
+        return AIMessage(content=self.reply)
 
 
 def make_spec(max_iterations: int = 3) -> SpecialistSpec:
@@ -60,12 +80,17 @@ def test_a_failed_call_is_retried_with_the_error_quoted():
 
 
 def test_retries_stop_at_the_iteration_cap():
-    """A permanently broken provider must not loop until the recursion limit."""
+    """A permanently broken provider must not loop until the recursion limit.
+
+    Two reasoning turns, then one wrap-up. The wrap-up is bounded too - it has
+    no tools and cannot route back - so a broken provider costs exactly
+    max_iterations + 1 calls, not an unbounded number.
+    """
     llm = FlakyLLM(failures=99)
 
     build_specialist(make_spec(max_iterations=2), llm_factory=lambda: llm).invoke(initial())
 
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 3
 
 
 def test_a_successful_call_clears_the_error():
@@ -140,3 +165,35 @@ class TestToollessEvidence:
 
         assert tool_evidence(messages, has_tools=True) == "web_search"
         assert tool_evidence(messages, has_tools=False) == "web_search"
+
+
+class TestWrapUp:
+    """Work done but never reported is work paid for twice."""
+
+    def test_a_capped_specialist_still_reports(self):
+        """Hitting the cap used to end the subgraph outright, so a specialist
+        that had downloaded, read and computed had no turn left to say what it
+        found - and the supervisor re-delegated the whole job."""
+        llm = StubLLM(reply="I established the total is 89706.00")
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "89706.00" in last_text(list(result["messages"]))
+
+    def test_the_wrap_up_turn_is_told_not_to_call_tools(self):
+        llm = StubLLM(reply="done")
+
+        build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(initial())
+
+        assert any("do not call any more tools" in str(c[-1].content).lower() for c in llm.calls)
+
+    def test_a_failed_wrap_up_does_not_kill_the_run(self):
+        llm = FlakyLLM(failures=99)
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "ran out of steps" in last_text(list(result["messages"]))
