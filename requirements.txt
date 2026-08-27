@@ -3,7 +3,7 @@
 # Space installs from requirements.txt. CI's "space-parity" job installs exactly
 # this file and imports app.py, so drift is caught before deploy.
 gradio[oauth]>=6.15,<7
-pandas>=2.2,<3
+pandas>=2.2,<4
 requests>=2.32,<3
 pydantic>=2.10,<3
 

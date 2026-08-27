@@ -41,7 +41,7 @@ tools = [
 ]
 app = [
   "gradio[oauth]>=6.15,<7",
-  "pandas>=2.2,<3",
+  "pandas>=2.2,<4",
 ]
 dev = [
   "pytest>=8.0",
