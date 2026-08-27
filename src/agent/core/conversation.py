@@ -108,7 +108,7 @@ def as_data(messages: Sequence[BaseMessage], tag: str = "task") -> list[BaseMess
 
 
 def drop_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
-    """Remove trailing tool calls that were never executed.
+    """Remove tool calls that were never executed.
 
     Anthropic requires every ``tool_use`` block to be followed immediately by
     its ``tool_result``: otherwise the request is rejected outright with
@@ -121,11 +121,25 @@ def drop_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessag
     needed. The requests are dropped rather than answered with synthetic
     results: they did not run, and inventing results would be a lie the model
     then reasons from.
+
+    Position matters and the first version of this got it wrong: it popped only
+    from the end, but ``summarize`` appends its own request after the
+    transcript, so the unresolved call sits second-to-last and was skipped. The
+    check has to be by *pairing*, not by position.
     """
-    conversation = list(messages)
-    while conversation and getattr(conversation[-1], "tool_calls", None):
-        conversation.pop()
-    return conversation
+    resolved = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id
+    }
+
+    kept: list[BaseMessage] = []
+    for message in messages:
+        requested = getattr(message, "tool_calls", None) or []
+        if requested and not all(str(call.get("id")) in resolved for call in requested):
+            continue
+        kept.append(message)
+    return kept
 
 
 def normalize(messages: Sequence[BaseMessage], request: str = CONTINUE) -> list[BaseMessage]:

@@ -242,3 +242,71 @@ class TestDropDanglingToolCalls:
         shaped = normalize([HumanMessage(content="q"), self._asking()])
 
         assert not any(getattr(m, "tool_calls", None) for m in shaped)
+
+
+class TestDanglingCallsByPairing:
+    """Position is not the rule - pairing is.
+
+    The first version popped only from the end, but summarize appends its own
+    request after the transcript, so the unresolved call sits second-to-last.
+    The provider rejected it at "messages.12", not at the end, on four
+    consecutive runs.
+    """
+
+    def _asking(self, call_id: str) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": call_id}],
+        )
+
+    def test_an_unresolved_call_is_dropped_from_the_middle(self):
+        messages = [
+            HumanMessage(content="q"),
+            self._asking("t1"),
+            HumanMessage(content="wrap up now"),
+        ]
+
+        kept = drop_dangling_tool_calls(messages)
+
+        assert kept == [messages[0], messages[2]]
+
+    def test_a_resolved_call_survives_even_mid_list(self):
+        messages = [
+            HumanMessage(content="q"),
+            self._asking("t1"),
+            ToolMessage(content="contents", tool_call_id="t1"),
+            HumanMessage(content="wrap up now"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_a_partially_resolved_request_is_dropped(self):
+        """One tool_use without its result invalidates the whole message."""
+        asking_twice = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "read_file", "args": {}, "id": "t1"},
+                {"name": "python_repl", "args": {}, "id": "t2"},
+            ],
+        )
+        messages = [
+            HumanMessage(content="q"),
+            asking_twice,
+            ToolMessage(content="only one", tool_call_id="t1"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0], messages[2]]
+
+    def test_the_wrap_up_shape_that_failed_in_production(self):
+        """system, transcript ending in an unrun call, then the wrap-up request."""
+        shaped = normalize(
+            [
+                SystemMessage(content="you are a specialist"),
+                HumanMessage(content="sum the spreadsheet"),
+                ToolMessage(content="rows...", tool_call_id="t0"),
+                self._asking("t9"),
+                HumanMessage(content="You have used your tool budget."),
+            ]
+        )
+
+        assert not any(getattr(m, "tool_calls", None) for m in shaped)
