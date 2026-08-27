@@ -411,9 +411,29 @@ class TestRefusalIsNotRepeated:
         first = orchestrator._supervise(
             {"messages": [HumanMessage(content="reversed")], "steps": 0}
         )
-        later = orchestrator._supervise(
-            {"messages": [HumanMessage(content="reversed")], "steps": 1}
+        again = orchestrator._supervise(
+            {
+                "messages": [HumanMessage(content="reversed")],
+                "steps": 1,
+                "instruction": first["instruction"],
+            }
         )
 
         assert first["next_agent"] == "code_agent"
-        assert later["next_agent"] == FINISH
+        assert again["next_agent"] == FINISH
+
+    def test_a_first_refusal_after_a_normal_round_still_recovers(self, settings, stub_llm):
+        """Keyed on "already refused", not on the round number. Using step > 0
+        conflated the two, so a task that routed normally and was then refused
+        skipped the recovery path - the one case it exists for."""
+        stub_llm(refusal="general_harms")
+
+        state = Orchestrator(settings)._supervise(
+            {
+                "messages": [HumanMessage(content="reversed")],
+                "steps": 1,
+                "instruction": "look up the discography",
+            }
+        )
+
+        assert state["next_agent"] == "code_agent"

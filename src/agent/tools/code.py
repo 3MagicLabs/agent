@@ -33,6 +33,11 @@ def _upload_attachments(sandbox: Any) -> list[str]:
     spreadsheet had to be retyped into the source of every program that touched
     it - which is why summing one column took three separate executions.
 
+    Scoped to the current task. The download directory outlives a task, so an
+    unscoped upload hands the second task the first one's spreadsheet and
+    announces it as available - the same bug downloaded_inventory was fixed
+    for, repeated here in the code written to fix something else.
+
     A fresh sandbox is created per call, so this runs per call too. Failures are
     logged and skipped: code that does not need the file must still run.
     """
@@ -40,15 +45,10 @@ def _upload_attachments(sandbox: Any) -> list[str]:
     if writer is None:  # pragma: no cover - older SDKs expose no filesystem
         return []
 
-    from agent.tools.files import download_dir
+    from agent.tools.files import current_task, task_attachments
 
     uploaded: list[str] = []
-    try:
-        entries = sorted(p for p in download_dir().iterdir() if p.is_file())
-    except OSError:
-        return []
-
-    for path in entries:
+    for path in task_attachments(current_task()):
         target = f"{SANDBOX_DIR}/{path.name}"
         try:
             writer(target, path.read_bytes())

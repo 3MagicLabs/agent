@@ -28,6 +28,7 @@ from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
 from agent.tools.cache import get_cache
+from agent.tools.files import set_current_task
 
 log = get_logger("eval.harness")
 
@@ -197,6 +198,9 @@ class BenchmarkRunner:
         # orchestrator, so without this every entry would live as long as the
         # process - and a Space runs for days.
         get_cache().new_generation()
+        # Tools cannot be passed the task id - it would land in the schema
+        # the model sees - so it is declared here instead.
+        set_current_task(task_id)
         started = time.monotonic()
 
         executor = ThreadPoolExecutor(max_workers=1)

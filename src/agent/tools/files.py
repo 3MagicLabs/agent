@@ -45,6 +45,42 @@ BINARY_HINTS = {
 }
 
 
+#: The task being answered, for tools that cannot be told directly. A tool is
+#: invoked by the graph runtime with only its declared arguments, and adding a
+#: task_id parameter would put it in the schema the model sees and is free to
+#: get wrong. Set by the harness per task, exactly like the tool cache's
+#: generation counter.
+_CURRENT_TASK = ""
+
+
+def set_current_task(task_id: str) -> None:
+    """Scope task-local tool behaviour to ``task_id``."""
+    global _CURRENT_TASK
+    _CURRENT_TASK = task_id
+
+
+def current_task() -> str:
+    return _CURRENT_TASK
+
+
+def task_attachments(task_id: str = "") -> list[Path]:
+    """Files downloaded for ``task_id``, or all of them when it is empty.
+
+    The download directory outlives a task. Listing it wholesale is how one
+    task came to read another's Python file and chess image, and - in the
+    sandbox uploader written to fix a different problem - how it came to be
+    handed another task's spreadsheet.
+    """
+    try:
+        return sorted(
+            p
+            for p in download_dir().iterdir()
+            if p.is_file() and (not task_id or p.name.startswith(task_id))
+        )
+    except OSError:
+        return []
+
+
 def download_dir() -> Path:
     target = get_settings().download_dir
     target.mkdir(parents=True, exist_ok=True)

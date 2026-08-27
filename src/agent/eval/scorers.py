@@ -94,18 +94,41 @@ def gold_answers(level: int = 1) -> dict[str, str]:
 
 #: Preambles models habitually emit despite being told not to.
 _PREFIX = re.compile(r"^\s*(final\s+answer\s*:|answer\s*:)\s*", re.IGNORECASE)
+#: Comma is kept so a list survives splitting; the decimal point and minus sign
+#: are removed only from text that is NOT a number - see below.
 _PUNCTUATION = str.maketrans("", "", string.punctuation.replace(",", ""))
-_NUMBER = re.compile(r"^-?\d[\d,]*\.?\d*$")
+#: Stripped before a numeric reading: thousands separators, currency, percent.
+_NUMERIC_NOISE = str.maketrans("", "", ",$%  ")
+
+
+def _as_number(text: str) -> str | None:
+    """``text`` as a canonical number, or None when it is not one."""
+    try:
+        return f"{float(text.translate(_NUMERIC_NOISE)):g}"
+    except (ValueError, OverflowError):
+        return None
 
 
 def normalize(answer: str) -> str:
-    """Canonical form used for comparison."""
-    text = _PREFIX.sub("", str(answer).strip()).strip().lower()
-    text = text.translate(_PUNCTUATION)
-    text = re.sub(r"\s+", " ", text).strip()
-    if _NUMBER.match(text.replace(" ", "")):
-        text = text.replace(",", "").replace(" ", "")
-    return text
+    """Canonical form used for comparison.
+
+    Numbers are read *before* punctuation is stripped, and this ordering is the
+    whole point. Stripping first deleted the decimal point and the minus sign,
+    so the grader scored "3.14" equal to "314" and "-5" equal to "5" - crediting
+    wrong answers - while judging a correct "89706" unequal to the reference
+    "89706.00", because one had been flattened and the other had not.
+
+    Two of the 53 level-1 reference answers are decimals and fifteen are
+    integers, so this was not hypothetical: it is the instrument that produced
+    every score in this project until it was checked.
+    """
+    text = _PREFIX.sub("", str(answer).strip()).strip()
+
+    number = _as_number(text)
+    if number is not None:
+        return number
+
+    return re.sub(r"\s+", " ", text.lower().translate(_PUNCTUATION)).strip()
 
 
 def exact_match(predicted: str, expected: str) -> bool:

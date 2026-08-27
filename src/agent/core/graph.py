@@ -208,11 +208,12 @@ class Orchestrator:
 
             category = refusal_category((result or {}).get("raw"))
             if category:
-                # Once only. The refusal is on the task text, which does not
-                # change between rounds, so a fallback that can fire again
-                # simply re-routes to the same specialist until the budget
-                # runs out - measured, four identical rounds.
-                if step > 0:
+                # Once only - but keyed on "a refusal already happened", not
+                # on the round number. The first version used step > 0, which
+                # conflates the two: a task that routes normally and is then
+                # refused at round 1 would skip the recovery path entirely,
+                # which is the one case it exists for.
+                if state.get("instruction") == REFUSAL_INSTRUCTION:
                     log.error("Routing declined by policy (%s) again - finishing.", category)
                     return {"next_agent": FINISH, "steps": 1}
                 target = self._refusal_route()

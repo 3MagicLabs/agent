@@ -19,7 +19,10 @@ pytestmark = pytest.mark.unit
         ("Answer: Paris", "paris"),
         ("  Paris  ", "paris"),
         ("1,234", "1234"),
-        ("$1,234.50", "123450"),
+        # Was asserted as "123450" - the decimal point stripped before the
+        # value was read as a number, which is precisely the bug that made
+        # the grader score 3.14 equal to 314.
+        ("$1,234.50", "1234.5"),
         ("The Eiffel Tower.", "the eiffel tower"),
         ("a, b, c", "a, b, c"),
     ],

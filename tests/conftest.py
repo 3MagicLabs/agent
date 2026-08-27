@@ -128,9 +128,16 @@ def clean_env(monkeypatch, tmp_path):
     reset_settings()
     set_settings(Settings(log_dir=tmp_path / "logs", download_dir=tmp_path / "downloads"))
 
-    from agent.tools.files import _INDEX
+    from agent.tools.cache import get_cache
+    from agent.tools.files import _INDEX, set_current_task
 
+    # Module-level state that outlives a test the way it outlives a task.
+    # Without these resets a suite-order change silently alters results:
+    # set_current_task leaking from a harness test made a sandbox-upload
+    # test pass alone and fail in the full run.
     _INDEX.clear()  # a listing cached under other settings must not leak
+    set_current_task("")
+    get_cache().clear()
     yield
     reset_settings()
 
