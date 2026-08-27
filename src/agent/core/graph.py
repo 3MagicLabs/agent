@@ -22,7 +22,13 @@ from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text,
 from agent.config import Settings, get_settings
 from agent.core.conversation import as_data, normalize, text_of
 from agent.core.llm import get_llm, with_effort
-from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
+from agent.core.prompts import (
+    FINALIZER,
+    FINALIZER_REQUEST,
+    ROSTER_MARKER,
+    ROUTER_REQUEST,
+    SUPERVISOR,
+)
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
@@ -90,9 +96,16 @@ def build_route_model(specs: tuple[SpecialistSpec, ...]) -> type[BaseModel]:
 
 
 def routing_prompt(specs: tuple[SpecialistSpec, ...]) -> str:
-    """Supervisor prompt with the live specialist roster appended."""
-    roster = "\n".join(f"- '{spec.name}': {spec.description}." for spec in specs)
-    return f"{SUPERVISOR}\n\nAvailable specialists:\n{roster}"
+    """Supervisor prompt with the live specialist roster substituted in.
+
+    Substituted rather than appended, and into the routing section rather
+    than after the closing tag. The prompt used to carry its own hand-written
+    roster as well, and the two drifted: one said web_agent reads webpages,
+    the generated one said it also downloads attachments, and the examples
+    sent attachments to code_agent instead. The specs are now the only source.
+    """
+    roster = "\n".join(f"- {spec.name}: {spec.description}." for spec in specs)
+    return SUPERVISOR.replace(ROSTER_MARKER, roster)
 
 
 def trim(messages: list[BaseMessage], keep: int) -> list[BaseMessage]:

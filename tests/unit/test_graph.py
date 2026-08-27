@@ -26,6 +26,7 @@ from agent.core.prompts import (
     FINALIZER,
     NO_ANSWER,
     REASON_SPECIALIST,
+    ROSTER_MARKER,
     SUPERVISOR,
     WEB_SPECIALIST,
 )
@@ -110,7 +111,7 @@ def test_self_contained_questions_are_routed_away_from_the_web(settings):
     """
     prompt = routing_prompt(Orchestrator(settings).specs)
 
-    assert "Prefer reason_agent" in " ".join(prompt.split())
+    assert "reason_agent when its own text contains everything" in " ".join(prompt.split())
     assert "reason_agent" in prompt
 
 
@@ -494,3 +495,41 @@ class TestWiring:
         shown = self._seeded_text(llm)
         assert "mine1111.xlsx" in shown
         assert "theirs2222.py" not in shown
+
+
+class TestRosterIsTheOnlySource:
+    """The prompt described the specialists twice and the copies disagreed.
+
+    The hand-written block said web_agent reads webpages; the generated roster
+    said it also downloads attachments; the examples sent attachments to
+    code_agent. One system prompt, three answers to "who handles a file".
+    """
+
+    def test_the_marker_is_substituted(self, settings):
+        prompt = routing_prompt(Orchestrator(settings).specs)
+
+        assert ROSTER_MARKER not in prompt
+
+    def test_each_specialist_is_described_exactly_once(self, settings):
+        """A second description is a second thing to keep in sync, and it wasn't."""
+        specs = Orchestrator(settings).specs
+        prompt = routing_prompt(specs)
+
+        for spec in specs:
+            assert prompt.count(f"- {spec.name}:") == 1, spec.name
+
+    def test_the_description_shown_is_the_one_the_spec_declares(self, settings):
+        specs = Orchestrator(settings).specs
+        flat = _flat(routing_prompt(specs))
+
+        for spec in specs:
+            assert _flat(spec.description) in flat, spec.name
+
+    def test_the_roster_sits_inside_the_routing_section(self, settings):
+        """It used to be appended after </stopping> - the unstructured trailing
+        text the XML restructure existed to remove."""
+        prompt = routing_prompt(Orchestrator(settings).specs)
+        routing = prompt.split("<routing>")[1].split("</routing>")[0]
+
+        for spec in Orchestrator(settings).specs:
+            assert spec.name in routing
