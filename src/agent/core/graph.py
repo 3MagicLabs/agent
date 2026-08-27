@@ -33,6 +33,37 @@ log = get_logger("core.graph")
 FINISH = "FINISH"
 FINAL_ANSWER = "final_answer"
 
+#: A safety classifier declined the request. Arrives as a normal 200 with an
+#: empty body, so it is only visible in stop_reason - and it is deterministic,
+#: unlike a malformed reply, so retrying only buys another refusal.
+REFUSAL = "refusal"
+
+#: Where to send a task the router was not permitted to read. The refusal is
+#: on the router's call; a specialist prompts differently and may not trip the
+#: same classifier. code_agent because text the router could not parse is
+#: usually encoded, and decoding is what it is for.
+REFUSAL_FALLBACK = "code_agent"
+
+REFUSAL_INSTRUCTION = (
+    "The router was not permitted to read this task, so it could not be "
+    "classified. Work directly from the task text."
+)
+
+
+def refusal_category(raw: Any) -> str:
+    """The category when a reply was declined by policy, else "".
+
+    A refusal is a *successful* response - HTTP 200, empty content, zero
+    output tokens - with the outcome carried in stop_reason. Read content
+    first and it is indistinguishable from an empty reply, which is how a
+    policy decision reached this code as "next_agent Field required".
+    """
+    metadata = getattr(raw, "response_metadata", None) or {}
+    if metadata.get("stop_reason") != REFUSAL:
+        return ""
+    details = metadata.get("stop_details") or {}
+    return str(details.get("category") or "unspecified")
+
 
 class RouteDecision(BaseModel):
     """Fallback schema used when no specialists are registered."""
@@ -149,28 +180,50 @@ class Orchestrator:
         # Capped like the finalizer: the router emits one schema selection
         # and a short justification, so it never needs a specialist's room.
         capped = get_llm().bind(max_tokens=self.settings.max_router_tokens)
+        # include_raw, because the default discards the reply and raises on a
+        # parse failure - so a policy refusal, which carries its cause in
+        # stop_reason, arrived here as a pydantic "field required" error.
         router = with_effort(capped, self.settings.router_effort).with_structured_output(
-            self._route_model, method="function_calling"
+            self._route_model, method="function_calling", include_raw=True
         )
-        # Retried once. A router that returns an empty object is not a failed
-        # run, it is a hiccup: the SDK retries transport errors, but a call that
-        # succeeds and returns {} is not an error it can see. Without this, one
-        # such reply ends the task - measured, on a task that had succeeded
-        # every previous time.
+        # Retried once, because a malformed reply is usually a hiccup. A refusal
+        # is not: it is deterministic, and the first version of this loop spent
+        # two round trips being declined identically before giving up.
         #
         # Typed Any deliberately. with_structured_output declares a non-Optional
-        # return, which would make the None check unreachable - but that is a
+        # return, which would make the None checks unreachable - but that is a
         # promise about a well-behaved provider, and this codebase exists
         # because providers return things their type signatures did not predict.
         decision: Any = None
         for attempt in (1, 2):
             try:
-                decision = router.invoke(messages)
+                result: Any = router.invoke(messages)
             except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
                 log.warning("Routing attempt %d failed: %s", attempt, exc)
                 continue
+
+            decision = (result or {}).get("parsed")
             if decision is not None:
                 break
+
+            category = refusal_category((result or {}).get("raw"))
+            if category:
+                target = self._refusal_route()
+                log.warning(
+                    "Routing declined by policy (%s) - sending to %s unclassified.",
+                    category,
+                    target,
+                )
+                return {
+                    "next_agent": target,
+                    "instruction": REFUSAL_INSTRUCTION,
+                    "steps": 1,
+                }
+            log.warning(
+                "Routing attempt %d produced no decision: %s",
+                attempt,
+                (result or {}).get("parsing_error"),
+            )
 
         if decision is None:
             log.error("Router returned no usable decision - finishing with what we have.")
@@ -180,6 +233,13 @@ class Orchestrator:
         instruction = str(getattr(decision, "reasoning", ""))
         log.info("step %d/%d -> %s (%s)", step + 1, budget, target, instruction)
         return {"next_agent": target, "instruction": instruction, "steps": 1}
+
+    def _refusal_route(self) -> str:
+        """Where an unclassifiable task goes. FINISH only if nothing can run."""
+        names = [spec.name for spec in self.specs]
+        if REFUSAL_FALLBACK in names:
+            return REFUSAL_FALLBACK
+        return names[0] if names else FINISH
 
     def _make_specialist_node(self, name: str) -> Callable[[SupervisorState], dict[str, Any]]:
         """Wrap a specialist subgraph as a supervisor node."""

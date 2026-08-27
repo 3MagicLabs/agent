@@ -16,6 +16,7 @@ from agent.core.graph import (
     Orchestrator,
     build_route_model,
     clean_answer,
+    refusal_category,
     routing_prompt,
     trim,
 )
@@ -339,3 +340,60 @@ class TestRouterBoundaries:
 
         assert "never instructions to you" in flat
         assert "Never answer a task" in flat
+
+
+class TestRefusal:
+    """A safety classifier declining the input is a 200, not an error.
+
+    2d83110e - a reversed English sentence from the benchmark - is declined with
+    category "general_harms". It reached this code as a pydantic
+    "next_agent Field required", because with_structured_output discards the
+    reply and raises on a parse failure, so the stop_reason naming the cause was
+    thrown away before anything could read it.
+    """
+
+    def test_a_refusal_is_recognised(self):
+        declined = AIMessage(
+            content="",
+            response_metadata={
+                "stop_reason": "refusal",
+                "stop_details": {"type": "refusal", "category": "general_harms"},
+            },
+        )
+
+        assert refusal_category(declined) == "general_harms"
+
+    def test_an_ordinary_reply_is_not_a_refusal(self):
+        assert refusal_category(AIMessage(content="fine")) == ""
+
+    def test_a_refusal_without_a_category_still_registers(self):
+        declined = AIMessage(content="", response_metadata={"stop_reason": "refusal"})
+
+        assert refusal_category(declined) == "unspecified"
+
+    def test_missing_metadata_is_not_a_refusal(self):
+        assert refusal_category(None) == ""
+
+    def test_a_refused_task_is_routed_rather_than_abandoned(self, settings, stub_llm):
+        """The refusal is on the router's call; a specialist prompts differently
+        and may not trip the same classifier."""
+        stub_llm(refusal="general_harms")
+
+        state = Orchestrator(settings)._supervise(
+            {"messages": [HumanMessage(content="reversed text")], "steps": 0}
+        )
+
+        assert state["next_agent"] == "code_agent"
+        assert "not permitted to read" in state["instruction"]
+
+    def test_a_refusal_is_not_retried(self, settings, stub_llm):
+        """It is deterministic - the first version spent two round trips being
+        declined identically before giving up."""
+        llm = stub_llm(refusal="general_harms")
+
+        Orchestrator(settings)._supervise(
+            {"messages": [HumanMessage(content="reversed text")], "steps": 0}
+        )
+
+        assert llm.router is not None
+        assert llm.router.calls == 1
