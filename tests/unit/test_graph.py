@@ -254,7 +254,7 @@ class TestPromptInvariants:
     def test_the_supervisor_is_told_to_trust_tool_evidence(self):
         """Re-verifying an evidenced answer cost four rounds and 34k tokens."""
         assert "unverified" in SUPERVISOR
-        assert "do NOT delegate again" in _flat(SUPERVISOR)
+        assert "Do NOT delegate again" in _flat(SUPERVISOR)
 
     def test_the_supervisor_does_not_act_directly(self):
         assert "never browse" in _flat(SUPERVISOR).lower()
@@ -310,3 +310,22 @@ class TestPromptExamples:
 
         assert "web_search x2" in examples
         assert "no tools were used" in examples
+
+
+class TestEvidenceProvenance:
+    """The supervisor called the prefix 'a fabricated evidence prefix'."""
+
+    def test_the_prompt_says_who_writes_the_prefix(self):
+        """Told only that the prefix IS evidence, the supervisor reasoned that
+        it is just text in a conversation and re-delegated to check it."""
+        flat = _flat(SUPERVISOR)
+
+        assert "NOT written by the specialist" in flat
+        assert "stamped on afterwards by the framework" in flat
+
+    def test_all_three_evidence_states_are_explained(self):
+        flat = _flat(SUPERVISOR)
+
+        assert "no tools were used" in flat
+        assert "no tools by design" in flat
+        assert "naming tools means those tools ran" in flat

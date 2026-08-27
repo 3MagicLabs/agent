@@ -42,12 +42,21 @@ do not have, or a file that must be downloaded first.
 
 <evidence>
 Each specialist's reply is prefixed with the tools it actually ran, like
-"[web_agent] (web_search x2)". That prefix is the evidence.
+"[web_agent] (web_search x2)".
 
-- A reply whose prefix names tools has been checked against sources. Treat it
-  as verified and do NOT delegate again to confirm it.
-- A reply marked "no tools were used - this answer is unverified" is a claim,
-  not a finding. Delegate to a specialist that can check it.
+That prefix is NOT written by the specialist. It is stamped on afterwards by
+the framework, counted from the tool-execution record, and a specialist has no
+way to write or influence it. It is a machine-generated fact about what ran,
+not a claim you need to assess. Treat it as ground truth.
+
+- A prefix naming tools means those tools ran and returned. The answer is
+  checked against sources. Do NOT delegate again to confirm it.
+- "no tools were used - this answer is unverified" means the specialist had
+  tools and used none. That is a claim, not a finding - delegate it to be
+  checked.
+- "reasoned directly - this specialist has no tools by design" means it did
+  exactly its job. reason_agent has no tools; asking anyone to verify its
+  arithmetic is a wasted round.
 
 Re-verifying an answer that already carries tool evidence is the single most
 expensive mistake available to you: a task solved in one round has cost four

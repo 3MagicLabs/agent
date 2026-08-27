@@ -321,3 +321,41 @@ class TestDatasetIndex:
         )
 
         assert files_module._dataset_index() == {}
+
+
+class TestInventoryScoping:
+    """The download directory outlives a task; the inventory must not."""
+
+    def test_only_the_current_task_is_listed(self, settings, monkeypatch):
+        """An unscoped listing offered the Excel task a Python file and a chess
+        image left by earlier tasks, and it read both."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "aaaa1111.xlsx").write_bytes(b"x")
+        (root / "bbbb2222.py").write_bytes(b"y")
+
+        listing = files_module.downloaded_inventory("aaaa1111")
+
+        assert "aaaa1111.xlsx" in listing
+        assert "bbbb2222.py" not in listing
+
+    def test_no_task_id_lists_everything(self, settings, monkeypatch):
+        """list_downloaded_files wants the whole directory."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "aaaa1111.xlsx").write_bytes(b"x")
+        (root / "bbbb2222.py").write_bytes(b"y")
+
+        listing = files_module.downloaded_inventory()
+
+        assert "aaaa1111.xlsx" in listing
+        assert "bbbb2222.py" in listing
+
+    def test_a_task_with_no_attachment_gets_nothing(self, settings, monkeypatch):
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        (settings.download_dir).mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "aaaa1111.xlsx").write_bytes(b"x")
+
+        assert files_module.downloaded_inventory("cccc3333") == ""

@@ -188,7 +188,7 @@ class Orchestrator:
             # A specialist gets a fresh state on every delegation, so it has no
             # memory of work it already did. Pushing the inventory is what stops
             # the second delegation re-fetching what the first one downloaded.
-            inventory = downloaded_inventory()
+            inventory = downloaded_inventory(state.get("task_id", ""))
             if inventory:
                 seeded = [*seeded, SystemMessage(content=inventory)]
             # The router already generated a justification for this delegation
@@ -284,7 +284,7 @@ class Orchestrator:
         unobservable while every metric record reported zero steps.
         """
         final_state = self.graph.invoke(
-            initial_supervisor_state([HumanMessage(content=question)]),
+            initial_supervisor_state([HumanMessage(content=question)], task_id),
             config=trace_config(task_id, callbacks),
         )
         steps = int(final_state.get("steps", 0))

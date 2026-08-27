@@ -69,16 +69,27 @@ def _existing_download(task_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def downloaded_inventory() -> str:
-    """Attachments already fetched, as a line to push into a specialist's context.
+def downloaded_inventory(task_id: str = "") -> str:
+    """Attachments already fetched for ``task_id``, as a line to push into a
+    specialist's context.
 
     Pushed rather than left to ``list_downloaded_files``: that tool has been
     bound to every file-capable specialist from the start and called zero times
     across 92 downloads. A tool the model must choose to call cannot fix a
     failure caused by the model not choosing to call things.
+
+    Scoped by task, because the download directory persists across a whole
+    run. Listing it wholesale offered the Excel task a Python file and a chess
+    image left by earlier tasks, and it read both - attachments are named by
+    task_id, so the filter is exact. An empty task_id lists everything, which
+    is what list_downloaded_files wants.
     """
     try:
-        entries = sorted(p for p in _download_dir().iterdir() if p.is_file())
+        entries = sorted(
+            p
+            for p in _download_dir().iterdir()
+            if p.is_file() and (not task_id or p.name.startswith(task_id))
+        )
     except OSError:
         return ""
     if not entries:
