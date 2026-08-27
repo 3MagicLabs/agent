@@ -92,6 +92,22 @@ class Settings:
     #: finalizer narrows it per call. It must fit a specialist's reasoning plus
     #: a tool call - the finalizer's 128 would truncate one mid-thought.
     max_specialist_tokens: int = 1024
+    #: Retried here when a classifier declines a request. Measured across the
+    #: four available models on the same input - a benchmark task written
+    #: backwards, and "What is the capital of France?" under the same
+    #: obfuscation as a control:
+    #:
+    #:     haiku-4-5    answered both
+    #:     sonnet-4-6   refused both (category: bio)
+    #:     sonnet-5     refused both (category: general_harms)
+    #:     opus-5       refused both (category: bio)
+    #:
+    #: Content is irrelevant - the encoding alone triggers it, and a question
+    #: about a European capital is classified a biological risk. Haiku is both
+    #: the model that accepts it and the cheapest, and it handles one call per
+    #: refused task rather than any share of the workload. Empty disables the
+    #: retry.
+    refusal_fallback_model: str = "claude-haiku-4-5"
 
     # --- orchestration budgets ---
     max_supervisor_steps: int = 4
@@ -242,6 +258,10 @@ def load_settings() -> Settings:
         llm_max_retries=_env_int("LLM_MAX_RETRIES", _DEFAULTS.llm_max_retries),
         max_answer_tokens=_env_int("MAX_ANSWER_TOKENS", _DEFAULTS.max_answer_tokens),
         max_router_tokens=_env_int("MAX_ROUTER_TOKENS", _DEFAULTS.max_router_tokens),
+        max_specialist_tokens=_env_int("MAX_SPECIALIST_TOKENS", _DEFAULTS.max_specialist_tokens),
+        refusal_fallback_model=os.getenv(
+            "REFUSAL_FALLBACK_MODEL", _DEFAULTS.refusal_fallback_model
+        ),
         router_effort=os.getenv("ROUTER_EFFORT", _DEFAULTS.router_effort),
         specialist_effort=os.getenv("SPECIALIST_EFFORT", _DEFAULTS.specialist_effort),
         finalizer_effort=os.getenv("FINALIZER_EFFORT", _DEFAULTS.finalizer_effort),

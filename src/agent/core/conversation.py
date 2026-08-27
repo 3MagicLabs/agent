@@ -23,6 +23,24 @@ from langchain_core.messages import (
 CONTINUE = "Continue."
 
 
+REFUSAL = "refusal"
+
+
+def refusal_category(reply: object) -> str:
+    """The category when a reply was declined by policy, else "".
+
+    A refusal is a *successful* response - HTTP 200, empty content, zero
+    output tokens - with the outcome carried in stop_reason. Read content
+    first and it is indistinguishable from an empty reply, which is how a
+    policy decision once reached the router as "next_agent Field required".
+    """
+    metadata = getattr(reply, "response_metadata", None) or {}
+    if metadata.get("stop_reason") != REFUSAL:
+        return ""
+    details = metadata.get("stop_details") or {}
+    return str(details.get("category") or "unspecified")
+
+
 def text_of(message: BaseMessage) -> str:
     """The readable text of a message, whatever shape its content is in.
 

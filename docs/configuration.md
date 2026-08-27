@@ -60,6 +60,8 @@ dropped with a warning rather than sent.
 | `MAX_ANSWER_TOKENS` | `128` | finalizer output |
 | `MAX_ROUTER_TOKENS` | `512` | router output; generous because thinking spends it |
 | `MAX_SPECIALIST_TOKENS` | `1024` | client-wide default |
+| `REFUSAL_FALLBACK_MODEL` | `claude-haiku-4-5` | retried here when a classifier
+  declines a request. Empty disables the retry |
 | `TOKENS_PER_MINUTE` | `0` | inter-task pacing; 0 disables. Set it only for a
   provider with a known tight ceiling |
 | `MAX_TASK_COST_USD` | `0.50` | stops the run if one task costs more |

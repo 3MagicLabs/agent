@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field, create_model
 
 from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
-from agent.core.conversation import as_data, normalize, text_of
-from agent.core.llm import get_llm, with_effort
+from agent.core.conversation import as_data, normalize, refusal_category, text_of
+from agent.core.llm import build_for, get_llm, with_effort
 from agent.core.prompts import (
     FINALIZER,
     FINALIZER_REQUEST,
@@ -54,21 +54,6 @@ REFUSAL_INSTRUCTION = (
     "The router was not permitted to read this task, so it could not be "
     "classified. Work directly from the task text."
 )
-
-
-def refusal_category(raw: Any) -> str:
-    """The category when a reply was declined by policy, else "".
-
-    A refusal is a *successful* response - HTTP 200, empty content, zero
-    output tokens - with the outcome carried in stop_reason. Read content
-    first and it is indistinguishable from an empty reply, which is how a
-    policy decision reached this code as "next_agent Field required".
-    """
-    metadata = getattr(raw, "response_metadata", None) or {}
-    if metadata.get("stop_reason") != REFUSAL:
-        return ""
-    details = metadata.get("stop_details") or {}
-    return str(details.get("category") or "unspecified")
 
 
 class RouteDecision(BaseModel):
@@ -220,6 +205,20 @@ class Orchestrator:
                 break
 
             category = refusal_category((result or {}).get("raw"))
+            if category and self.settings.refusal_fallback_model:
+                # Retried on another model rather than routed blind. The
+                # refusal is a classifier decision on the input and
+                # classifiers differ between models: haiku answers text
+                # sonnet and opus both decline. One call, only when declined.
+                log.warning(
+                    "Routing declined (%s) - retrying on %s.",
+                    category,
+                    self.settings.refusal_fallback_model,
+                )
+                rescued = self._route_with(self.settings.refusal_fallback_model, messages)
+                if rescued is not None:
+                    decision = rescued
+                    break
             if category:
                 # Once only - but keyed on "a refusal already happened", not
                 # on the round number. The first version used step > 0, which
@@ -254,6 +253,25 @@ class Orchestrator:
         instruction = str(getattr(decision, "reasoning", ""))
         log.info("step %d/%d -> %s (%s)", step + 1, budget, target, instruction)
         return {"next_agent": target, "instruction": instruction, "steps": 1}
+
+    def _route_with(self, model_name: str, messages: list[BaseMessage]) -> Any:
+        """One routing attempt on another model, or None if that fails too.
+
+        Takes a name rather than a client so that building the client is
+        inside the guard: constructing it can raise (no credentials for that
+        model, an unknown name), and an argument is evaluated before the call
+        that was meant to protect it.
+        """
+        try:
+            capped = build_for(model_name).bind(max_tokens=self.settings.max_router_tokens)
+            router = capped.with_structured_output(
+                self._route_model, method="function_calling", include_raw=True
+            )
+            result: Any = router.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 - the fallback is best-effort
+            log.warning("Fallback routing on %s failed: %s", model_name, exc)
+            return None
+        return (result or {}).get("parsed")
 
     def _refusal_route(self) -> str:
         """Where an unclassifiable task goes. FINISH only if nothing can run."""

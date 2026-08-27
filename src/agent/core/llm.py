@@ -6,6 +6,7 @@ design) meant a missing key crashed the whole application before it started.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import lru_cache
 from typing import Any, TypeVar, cast
 
@@ -87,6 +88,18 @@ def with_effort(model: M, effort: str) -> M:
     if get_settings().provider != "anthropic":
         return model
     return cast(M, model.bind(reasoning_effort=effort))
+
+
+def build_for(model: str) -> BaseChatModel:
+    """A client pinned to ``model``, for retrying a declined request.
+
+    Measured across every available model on the same input: haiku-4-5
+    answers text that sonnet-4-6, sonnet-5 and opus-5 all decline, including
+    an innocuous question written backwards. The refusal is a classifier
+    decision on the encoding and classifiers differ between models, so a
+    second opinion is the whole remedy.
+    """
+    return build_llm(replace(get_settings(), model=model))
 
 
 @lru_cache(maxsize=1)

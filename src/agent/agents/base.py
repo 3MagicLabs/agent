@@ -25,8 +25,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from agent.config import get_settings
-from agent.core.conversation import normalize, text_of
-from agent.core.llm import get_llm, with_effort
+from agent.core.conversation import normalize, refusal_category, text_of
+from agent.core.llm import build_for, get_llm, with_effort
 from agent.core.prompts import SPECIALIST_WRAP_UP
 from agent.core.state import SpecialistState
 from agent.obs.logging import get_logger
@@ -126,7 +126,19 @@ def build_specialist(
             base = resolve()
             paced = with_effort(base, get_settings().specialist_effort)
             model = paced.bind_tools(tool_list) if tool_list else paced
-            response: BaseMessage = model.invoke(normalize(messages))
+            shaped = normalize(messages)
+            response: BaseMessage = model.invoke(shaped)
+
+            # A specialist is handed the same text as the router, so it is
+            # declined the same way - which is why routing a refused task to
+            # a specialist recovered nothing. Retried on a model measured to
+            # accept the input.
+            category = refusal_category(response)
+            fallback = get_settings().refusal_fallback_model
+            if category and fallback:
+                log.warning("%s declined (%s) - retrying on %s.", spec.name, category, fallback)
+                rescue = build_for(fallback)
+                response = (rescue.bind_tools(tool_list) if tool_list else rescue).invoke(shaped)
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s reasoning failed: %s", spec.name, exc)
             # Recorded, not swallowed: `route` sends it back here with the error

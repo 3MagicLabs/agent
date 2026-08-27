@@ -43,6 +43,14 @@ from langchain_core.messages import HumanMessage, SystemMessage  # isort: skip
 #: the answer."
 QUESTION = '.rewsna eht sa "tfel" drow eht fo etisoppo eht etirw ,ecnetnes siht dnatsrednu uoy fI'
 
+#: The same instruction written plainly. If this routes, the obfuscation is
+#: what trips the classifier rather than what the sentence asks for.
+DECODED = 'If you understand this sentence, write the opposite of the word "left" as the answer.'
+
+#: A harmless question under the same obfuscation. If this refuses, reversal
+#: alone is enough and the content is irrelevant.
+REVERSED_HARMLESS = "?ecnarF fo latipac eht si tahW"
+
 
 def show(label: str, reply: Any) -> None:
     """Print everything that distinguishes the three explanations."""
@@ -94,6 +102,21 @@ def main() -> int:
         ROUTER_REQUEST,
     )
     show("control - an ordinary question", bound.invoke(control))
+
+    # 4 and 5 separate two explanations that imply different fixes.
+    #
+    #   Only DECODED refuses  -> the "prove you decoded this, then answer"
+    #                            shape is the trigger; reversal is incidental.
+    #   Only REVERSED refuses -> obfuscation alone is the trigger, whatever the
+    #                            text says.
+    #   Both refuse           -> either is sufficient.
+    #   Neither refuses       -> only the combination trips it.
+    for label, text in (
+        ("decoded - same instruction, plainly written", DECODED),
+        ("reversed - harmless question, same obfuscation", REVERSED_HARMLESS),
+    ):
+        probe = normalize([system, *as_data([HumanMessage(content=text)])], ROUTER_REQUEST)
+        show(label, bound.invoke(probe))
 
     return 0
 

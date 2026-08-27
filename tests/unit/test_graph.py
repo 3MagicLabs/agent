@@ -7,11 +7,13 @@ shut.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent.config import Settings, load_settings
 from agent.core.graph import (
     FINISH,
     Orchestrator,
@@ -533,3 +535,45 @@ class TestRosterIsTheOnlySource:
 
         for spec in Orchestrator(settings).specs:
             assert spec.name in routing
+
+
+class TestRefusalFallback:
+    """A declined request is retried on a model measured to accept the input.
+
+    Across the four available models on the same text - the benchmark task, and
+    "What is the capital of France?" under the same obfuscation as a control -
+    haiku-4-5 answered both while sonnet-4-6, sonnet-5 and opus-5 declined both,
+    two of them classifying a question about a European capital as a biological
+    risk. The refusal is a classifier decision on the encoding, and classifiers
+    differ between models.
+    """
+
+    def test_the_fallback_model_is_named_in_settings(self):
+        assert Settings().refusal_fallback_model == "claude-haiku-4-5"
+
+    def test_it_is_overridable(self, monkeypatch):
+        monkeypatch.setenv("REFUSAL_FALLBACK_MODEL", "claude-opus-5")
+
+        assert load_settings().refusal_fallback_model == "claude-opus-5"
+
+    def test_an_empty_setting_disables_the_retry(self, settings, stub_llm):
+        """Falls back to routing blind, which is better than abandoning."""
+        stub_llm(refusal="general_harms")
+        disabled = replace(settings, refusal_fallback_model="")
+
+        state = Orchestrator(disabled)._supervise(
+            {"messages": [HumanMessage(content="reversed")], "steps": 0}
+        )
+
+        assert state["next_agent"] == "code_agent"
+
+    def test_a_failing_fallback_does_not_crash_the_task(self, settings, stub_llm):
+        """Building the client can raise - no credentials for that model, a bad
+        name - and it is built inside the guard so that cannot escape."""
+        stub_llm(refusal="general_harms")
+
+        state = Orchestrator(settings)._supervise(
+            {"messages": [HumanMessage(content="reversed")], "steps": 0}
+        )
+
+        assert state["next_agent"] in {"code_agent", FINISH}
