@@ -6,8 +6,14 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from tests.conftest import ToolCallingLLM
 
-from agent.agents.base import SpecialistSpec, build_specialist, tool_evidence
+from agent.agents.base import (
+    SpecialistSpec,
+    build_specialist,
+    last_text,
+    tool_evidence,
+)
 from agent.tools import get_tools
 
 pytestmark = pytest.mark.unit
@@ -28,6 +34,21 @@ class FlakyLLM:
         if len(self.calls) <= self.failures:
             raise RuntimeError("tool_use_failed: malformed function call")
         return AIMessage(content="42")
+
+
+class StubLLM:
+    """Always answers, never calls tools."""
+
+    def __init__(self, reply: str = "ok") -> None:
+        self.reply = reply
+        self.calls: list[list[BaseMessage]] = []
+
+    def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
+        return self
+
+    def invoke(self, messages: list[BaseMessage]) -> AIMessage:
+        self.calls.append(list(messages))
+        return AIMessage(content=self.reply)
 
 
 def make_spec(max_iterations: int = 3) -> SpecialistSpec:
@@ -60,12 +81,17 @@ def test_a_failed_call_is_retried_with_the_error_quoted():
 
 
 def test_retries_stop_at_the_iteration_cap():
-    """A permanently broken provider must not loop until the recursion limit."""
+    """A permanently broken provider must not loop until the recursion limit.
+
+    Two reasoning turns, then one wrap-up. The wrap-up is bounded too - it has
+    no tools and cannot route back - so a broken provider costs exactly
+    max_iterations + 1 calls, not an unbounded number.
+    """
     llm = FlakyLLM(failures=99)
 
     build_specialist(make_spec(max_iterations=2), llm_factory=lambda: llm).invoke(initial())
 
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 3
 
 
 def test_a_successful_call_clears_the_error():
@@ -117,3 +143,117 @@ class TestToolEvidence:
         )
 
         assert "unverified" in tool_evidence([requested])
+
+
+class TestToollessEvidence:
+    """A specialist with no tools has not failed to use them."""
+
+    def test_a_toolless_specialist_is_not_marked_unverified(self):
+        """reason_agent has tools=() by design, so 'unverified' made the
+        supervisor re-delegate after every single reasoning turn."""
+        evidence = tool_evidence([AIMessage(content="b, e")], has_tools=False)
+
+        assert "unverified" not in evidence
+        assert "no tools by design" in evidence
+
+    def test_a_tooled_specialist_that_used_none_is_still_unverified(self):
+        evidence = tool_evidence([AIMessage(content="probably 3")], has_tools=True)
+
+        assert "unverified" in evidence
+
+    def test_tools_that_ran_are_reported_either_way(self):
+        messages = [ToolMessage(content="r", name="web_search", tool_call_id="1")]
+
+        assert tool_evidence(messages, has_tools=True) == "web_search"
+        assert tool_evidence(messages, has_tools=False) == "web_search"
+
+
+class TestWrapUp:
+    """Work done but never reported is work paid for twice.
+
+    These drive a specialist with a stub that really emits tool calls and really
+    enforces the provider's message rules. Asserting on the returned *text* is
+    not enough: summarize catches every exception and substitutes "ran out of
+    steps before reporting", so a contract violation reads exactly like an
+    honest budget exhaustion - which is how the same 400 shipped twice.
+    """
+
+    def test_a_capped_specialist_still_reports(self):
+        """Hitting the budget used to end the subgraph outright, so a specialist
+        that had downloaded, read and computed had no turn left to say what it
+        found - and the supervisor re-delegated the whole job."""
+        llm = ToolCallingLLM(script=["read_file"], reply="the total is 89706.00")
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "89706.00" in last_text(list(result["messages"]))
+
+    def test_the_wrap_up_conversation_is_well_formed(self):
+        """The assertion that matters is on what was SENT, not what came back."""
+        llm = ToolCallingLLM(script=["read_file"], reply="done")
+
+        build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(initial())
+
+        final = llm.calls[-1]
+        resolved = {m.tool_call_id for m in final if isinstance(m, ToolMessage)}
+        for message in final:
+            for call in getattr(message, "tool_calls", None) or []:
+                assert str(call["id"]) in resolved, "an unrun tool call reached the provider"
+
+    def test_the_wrap_up_did_not_silently_fail(self):
+        """ "ran out of steps" is the fallback that hid two shipped 400s."""
+        llm = ToolCallingLLM(script=["read_file"], reply="the total is 89706.00")
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "ran out of steps" not in last_text(list(result["messages"]))
+
+    def test_the_wrap_up_turn_is_told_not_to_call_tools(self):
+        llm = ToolCallingLLM(script=["read_file"], reply="done")
+
+        build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(initial())
+
+        assert any("do not call any more tools" in str(c[-1].content).lower() for c in llm.calls)
+
+    def test_a_failed_wrap_up_does_not_kill_the_run(self):
+        llm = FlakyLLM(failures=99)
+
+        result = build_specialist(make_spec(max_iterations=1), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert "ran out of steps" in last_text(list(result["messages"]))
+
+
+class TestBudgetCountsToolCalls:
+    """The budget bounds tool calls, not thoughts.
+
+    Counting every reasoning turn meant a tool call and the thought producing it
+    each cost one, so six turns bought five tools and nothing to report with -
+    the whole reason the summarize node had to be written.
+    """
+
+    def test_an_answer_without_tools_costs_nothing(self):
+        llm = ToolCallingLLM(script=[], reply="42")
+
+        result = build_specialist(make_spec(max_iterations=3), llm_factory=lambda: llm).invoke(
+            initial()
+        )
+
+        assert result["iterations"] == 0
+        assert len(llm.calls) == 1
+
+    def test_a_finished_specialist_is_not_sent_to_wrap_up(self):
+        """It answered on its last allowed turn; summarising replaces a good
+        answer with a paraphrase of itself."""
+        llm = ToolCallingLLM(script=["read_file"], reply="the answer")
+
+        build_specialist(make_spec(max_iterations=2), llm_factory=lambda: llm).invoke(initial())
+
+        assert not any(
+            "do not call any more tools" in str(c[-1].content).lower() for c in llm.calls
+        )

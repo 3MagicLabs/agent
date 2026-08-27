@@ -18,6 +18,10 @@ class SupervisorState(TypedDict, total=False):
 
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next_agent: str
+    #: The task being answered. Scopes the attachment inventory: the download
+    #: directory outlives a task, and an unscoped listing let one task read
+    #: another's files.
+    task_id: str
     #: The router's justification for the current delegation, passed through to
     #: the specialist so it knows its task instead of inferring one.
     instruction: str
@@ -34,8 +38,8 @@ class SpecialistState(TypedDict, total=False):
     last_error: str
 
 
-def initial_supervisor_state(messages: list[BaseMessage]) -> SupervisorState:
-    return {"messages": messages, "next_agent": "", "steps": 0}
+def initial_supervisor_state(messages: list[BaseMessage], task_id: str = "") -> SupervisorState:
+    return {"messages": messages, "next_agent": "", "task_id": task_id, "steps": 0}
 
 
 def initial_specialist_state(messages: list[BaseMessage]) -> SpecialistState:

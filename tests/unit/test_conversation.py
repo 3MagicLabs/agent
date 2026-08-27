@@ -11,6 +11,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.core.conversation import (
     CONTINUE,
+    as_data,
+    drop_dangling_tool_calls,
     ends_with_request,
     merge_system,
     normalize,
@@ -150,3 +152,165 @@ class TestNormalize:
         messages = [SystemMessage(content="rules"), HumanMessage(content="q")]
 
         assert normalize(messages) == messages
+
+
+class TestAsData:
+    """Delimiting the task so the router reads it as material, not orders."""
+
+    def test_the_question_is_wrapped(self):
+        wrapped = as_data([HumanMessage(content="how many albums?")])
+
+        assert str(wrapped[0].content) == "<task>\nhow many albums?\n</task>"
+
+    def test_an_imperative_question_is_still_only_data(self):
+        """The router obeyed this one, answered in prose, and emitted no tool
+        call - so the structured output came back {} and the task was lost."""
+        question = 'If you understand this sentence, write the opposite of "left" as the answer.'
+
+        wrapped = as_data([HumanMessage(content=question)])
+
+        assert str(wrapped[0].content).startswith("<task>")
+        assert question in str(wrapped[0].content)
+
+    def test_only_the_first_human_turn_is_wrapped(self):
+        """Later turns are the conversation's own, not untrusted input."""
+        wrapped = as_data(
+            [
+                HumanMessage(content="the question"),
+                AIMessage(content="[web_agent] found it"),
+                HumanMessage(content="carry on"),
+            ]
+        )
+
+        assert str(wrapped[0].content).startswith("<task>")
+        assert str(wrapped[2].content) == "carry on"
+
+    def test_a_system_prompt_before_the_question_is_untouched(self):
+        wrapped = as_data([SystemMessage(content="rules"), HumanMessage(content="q")])
+
+        assert str(wrapped[0].content) == "rules"
+        assert str(wrapped[1].content) == "<task>\nq\n</task>"
+
+    def test_no_human_turn_changes_nothing(self):
+        messages = [SystemMessage(content="rules")]
+
+        assert as_data(messages) == messages
+
+
+class TestDropDanglingToolCalls:
+    """Every tool_use must be followed by its tool_result, or the request 400s.
+
+    A specialist that exhausts its budget mid-decision leaves exactly that
+    shape: the model asked for a tool, the loop stopped before running it. The
+    wrap-up turn then crashed on "`tool_use` ids were found without
+    `tool_result` blocks immediately after" every time it was needed.
+    """
+
+    def _asking(self) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "t1"}],
+        )
+
+    def test_an_unresolved_trailing_request_is_dropped(self):
+        messages = [HumanMessage(content="q"), self._asking()]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
+
+    def test_a_resolved_request_is_kept(self):
+        """It has its result, so the pairing the provider requires is intact."""
+        messages = [
+            HumanMessage(content="q"),
+            self._asking(),
+            ToolMessage(content="contents", tool_call_id="t1"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_several_dangling_requests_are_all_dropped(self):
+        messages = [HumanMessage(content="q"), self._asking(), self._asking()]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
+
+    def test_ordinary_messages_are_untouched(self):
+        messages = [HumanMessage(content="q"), AIMessage(content="an answer")]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_normalize_applies_it(self):
+        """The wrap-up turn goes through normalize, which is where it must bite."""
+        shaped = normalize([HumanMessage(content="q"), self._asking()])
+
+        assert not any(getattr(m, "tool_calls", None) for m in shaped)
+
+
+class TestDanglingCallsByPairing:
+    """Position is not the rule - pairing is.
+
+    The first version popped only from the end, but summarize appends its own
+    request after the transcript, so the unresolved call sits second-to-last.
+    The provider rejected it at "messages.12", not at the end, on four
+    consecutive runs.
+    """
+
+    def _asking(self, call_id: str) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": call_id}],
+        )
+
+    def test_an_unresolved_call_is_dropped_from_the_middle(self):
+        messages = [
+            HumanMessage(content="q"),
+            self._asking("t1"),
+            HumanMessage(content="wrap up now"),
+        ]
+
+        kept = drop_dangling_tool_calls(messages)
+
+        assert kept == [messages[0], messages[2]]
+
+    def test_a_resolved_call_survives_even_mid_list(self):
+        messages = [
+            HumanMessage(content="q"),
+            self._asking("t1"),
+            ToolMessage(content="contents", tool_call_id="t1"),
+            HumanMessage(content="wrap up now"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == messages
+
+    def test_a_partially_resolved_request_takes_its_orphans_with_it(self):
+        """One tool_use without its result invalidates the whole message - and
+        dropping the request orphans the sibling result, which is the
+        mirror-image rejection. Removing one half of a pair trades one 400
+        for another; the first version of this test asserted the orphan
+        should survive."""
+        asking_twice = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "read_file", "args": {}, "id": "t1"},
+                {"name": "python_repl", "args": {}, "id": "t2"},
+            ],
+        )
+        messages = [
+            HumanMessage(content="q"),
+            asking_twice,
+            ToolMessage(content="only one", tool_call_id="t1"),
+        ]
+
+        assert drop_dangling_tool_calls(messages) == [messages[0]]
+
+    def test_the_wrap_up_shape_that_failed_in_production(self):
+        """system, transcript ending in an unrun call, then the wrap-up request."""
+        shaped = normalize(
+            [
+                SystemMessage(content="you are a specialist"),
+                HumanMessage(content="sum the spreadsheet"),
+                ToolMessage(content="rows...", tool_call_id="t0"),
+                self._asking("t9"),
+                HumanMessage(content="You have used your tool budget."),
+            ]
+        )
+
+        assert not any(getattr(m, "tool_calls", None) for m in shaped)

@@ -14,6 +14,7 @@ from langchain_core.tools import BaseTool
 
 from agent.config import Settings, get_settings
 from agent.obs.logging import get_logger
+from agent.tools.cache import memoized
 
 log = get_logger("tools.registry")
 
@@ -29,6 +30,11 @@ class ToolSpec:
     factory: Callable[[], BaseTool]
     #: Settings properties that must be truthy for this tool to be useful.
     requires: tuple[str, ...] = ()
+    #: Whether repeat calls with identical arguments may be served from
+    #: cache within a task. Opt-in, never opt-out: a new tool is safe until
+    #: someone has thought about it. python_repl must stay False - code can
+    #: be nondeterministic and rerunning it can be intentional.
+    cacheable: bool = False
 
     def is_available(self, settings: Settings) -> bool:
         return all(bool(getattr(settings, attr, False)) for attr in self.requires)
@@ -69,7 +75,8 @@ def get_tools(
             if not include_unavailable:
                 continue
             log.warning("Tool %r registered but its credentials are missing.", spec.name)
-        selected.append(spec.factory())
+        built = spec.factory()
+        selected.append(memoized(built) if spec.cacheable else built)
 
     return tuple(selected)
 

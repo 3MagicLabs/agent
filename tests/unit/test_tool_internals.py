@@ -6,7 +6,7 @@ tested without touching the network.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -64,7 +64,7 @@ class TestScrape:
 
         result = scrape_webpage.invoke({"url": "https://example.com"})
 
-        assert "[content truncated]" in result
+        assert "content elided" in result
         assert len(result) <= settings.max_scrape_chars + 50
 
     def test_non_html_is_returned_raw(self, fake_get):
@@ -184,7 +184,7 @@ class TestSandboxRendering:
     def test_output_is_truncated(self):
         execution = FakeExecution(logs=FakeLogs(stdout=["x" * 500]))
 
-        assert "[output truncated]" in _render(execution, limit=50)
+        assert "output elided" in _render(execution, limit=50)
 
     def test_stderr_is_labelled(self):
         execution = FakeExecution(logs=FakeLogs(stdout=["ok"], stderr=["warning"]))
@@ -254,3 +254,162 @@ class TestSandboxExecution:
         monkeypatch.setattr(code_module, "_load_sandbox_class", missing)
 
         assert "unavailable" in python_repl.invoke({"code": "print(1)"})
+
+
+class TestDatasetIndex:
+    """The GAIA listing must retry after a failure, not memoise it."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_index(self):
+        files_module._INDEX.clear()
+        yield
+        files_module._INDEX.clear()
+
+    def test_a_failed_listing_is_retried(self, monkeypatch, settings):
+        """One transient error must not disable attachments for the process.
+
+        Measured before this fix: six consecutive tasks failed against an empty
+        index while the same request succeeded a minute later.
+        """
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token="t"))
+        attempts: list[int] = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                if len(attempts) == 1:
+                    raise OSError("transient")
+
+            def json(self) -> list[dict[str, str]]:
+                return [{"path": "2023/validation/abc.xlsx"}]
+
+        def fetch(*_args, **_kwargs):
+            attempts.append(1)
+            return Response()
+
+        monkeypatch.setattr(files_module.requests, "get", fetch)
+
+        assert files_module._dataset_index() == {}
+        assert files_module._dataset_index() == {"abc": "2023/validation/abc.xlsx"}
+        assert len(attempts) == 2
+
+    def test_a_successful_listing_is_cached(self, monkeypatch, settings):
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token="t"))
+        attempts: list[int] = []
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> list[dict[str, str]]:
+                return [{"path": "2023/validation/abc.xlsx"}]
+
+        def fetch(*_args, **_kwargs):
+            attempts.append(1)
+            return Response()
+
+        monkeypatch.setattr(files_module.requests, "get", fetch)
+
+        files_module._dataset_index()
+        files_module._dataset_index()
+
+        assert len(attempts) == 1
+
+    def test_no_token_means_no_listing_attempt(self, monkeypatch, settings):
+        monkeypatch.setattr(files_module, "get_settings", lambda: replace(settings, hf_token=""))
+        monkeypatch.setattr(
+            files_module.requests, "get", lambda *a, **k: pytest.fail("should not fetch")
+        )
+
+        assert files_module._dataset_index() == {}
+
+
+class TestInventoryScoping:
+    """The download directory outlives a task; the inventory must not."""
+
+    def test_only_the_current_task_is_listed(self, settings, monkeypatch):
+        """An unscoped listing offered the Excel task a Python file and a chess
+        image left by earlier tasks, and it read both."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "aaaa1111.xlsx").write_bytes(b"x")
+        (root / "bbbb2222.py").write_bytes(b"y")
+
+        listing = files_module.downloaded_inventory("aaaa1111")
+
+        assert "aaaa1111.xlsx" in listing
+        assert "bbbb2222.py" not in listing
+
+    def test_no_task_id_lists_everything(self, settings, monkeypatch):
+        """list_downloaded_files wants the whole directory."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        root = settings.download_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "aaaa1111.xlsx").write_bytes(b"x")
+        (root / "bbbb2222.py").write_bytes(b"y")
+
+        listing = files_module.downloaded_inventory()
+
+        assert "aaaa1111.xlsx" in listing
+        assert "bbbb2222.py" in listing
+
+    def test_a_task_with_no_attachment_gets_nothing(self, settings, monkeypatch):
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        (settings.download_dir).mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "aaaa1111.xlsx").write_bytes(b"x")
+
+        assert files_module.downloaded_inventory("cccc3333") == ""
+
+
+class TestSandboxUploads:
+    """The sandbox is a remote container; the download directory is local."""
+
+    class FakeFiles:
+        def __init__(self, fail: bool = False) -> None:
+            self.written: list[tuple[str, bytes]] = []
+            self.fail = fail
+
+        def write(self, path: str, data: bytes) -> None:
+            if self.fail:
+                raise OSError("no space")
+            self.written.append((path, data))
+
+    class FakeSandbox:
+        def __init__(self, files) -> None:
+            self.files = files
+
+    def test_attachments_are_copied_in(self, settings, monkeypatch):
+        """Without this the specialist could only work from what read_file had
+        printed, so a spreadsheet was retyped into every program touching it."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "sales.xlsx").write_bytes(b"binary")
+
+        files = self.FakeFiles()
+        uploaded = code_module._upload_attachments(self.FakeSandbox(files))
+
+        assert uploaded == ["/home/user/sales.xlsx"]
+        assert files.written == [("/home/user/sales.xlsx", b"binary")]
+
+    def test_the_paths_are_reported_to_the_model(self):
+        """It cannot list the sandbox itself, so it has to be told."""
+        rendered = code_module._prefix_uploads("42", ["/home/user/sales.xlsx"])
+
+        assert "sales.xlsx" in rendered
+        assert rendered.endswith("42")
+
+    def test_no_attachments_adds_no_noise(self):
+        assert code_module._prefix_uploads("42", []) == "42"
+
+    def test_an_upload_failure_does_not_stop_execution(self, settings, monkeypatch):
+        """Code that does not need the file must still run."""
+        monkeypatch.setattr(files_module, "get_settings", lambda: settings)
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        (settings.download_dir / "sales.xlsx").write_bytes(b"binary")
+
+        uploaded = code_module._upload_attachments(self.FakeSandbox(self.FakeFiles(fail=True)))
+
+        assert uploaded == []
+
+    def test_an_sdk_without_a_filesystem_is_tolerated(self):
+        assert code_module._upload_attachments(object()) == []

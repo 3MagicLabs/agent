@@ -24,8 +24,10 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from agent.core.conversation import normalize, text_of
-from agent.core.llm import get_llm
+from agent.config import get_settings
+from agent.core.conversation import normalize, refusal_category, text_of
+from agent.core.llm import build_for, get_llm, with_effort
+from agent.core.prompts import SPECIALIST_WRAP_UP
 from agent.core.state import SpecialistState
 from agent.obs.logging import get_logger
 
@@ -47,7 +49,7 @@ class SpecialistSpec:
         return self.name
 
 
-def tool_evidence(messages: Sequence[BaseMessage]) -> str:
+def tool_evidence(messages: Sequence[BaseMessage], *, has_tools: bool = True) -> str:
     """Which tools actually ran, as one line the supervisor can read.
 
     The supervisor sees only a specialist's final text, so a researched answer
@@ -57,6 +59,12 @@ def tool_evidence(messages: Sequence[BaseMessage]) -> str:
     the claim "wasn't confirmed with a search" while eight searches sat in the
     log.
 
+    ``has_tools`` distinguishes the two ways of running no tools. A specialist
+    that could have searched and did not has produced a claim; one that has no
+    tools at all has done exactly its job. Reporting both as "unverified" made
+    the supervisor re-delegate after every single reason_agent turn, since that
+    specialist is tool-less by design and can never satisfy the check.
+
     ``ToolMessage`` is the evidence rather than ``AIMessage.tool_calls``: a call
     can be requested and still never run.
     """
@@ -64,6 +72,8 @@ def tool_evidence(messages: Sequence[BaseMessage]) -> str:
         str(message.name or "unknown") for message in messages if isinstance(message, ToolMessage)
     )
     if not counts:
+        if not has_tools:
+            return "reasoned directly - this specialist has no tools by design"
         return "no tools were used - this answer is unverified"
     return ", ".join(
         f"{name} x{count}" if count > 1 else name for name, count in sorted(counts.items())
@@ -85,13 +95,18 @@ def last_text(messages: Sequence[BaseMessage], default: str = "(no output produc
 
 def build_specialist(
     spec: SpecialistSpec,
-    llm_factory: Callable[[], Any] = get_llm,
+    llm_factory: Callable[[], Any] | None = None,
 ) -> Any:
     """Compile a ReAct subgraph for one specialist.
 
-    ``llm_factory`` is injected rather than imported so tests can substitute a
-    stub without patching module globals.
+    ``llm_factory`` is injected so tests can substitute a stub. It defaults to
+    None rather than to ``get_llm`` because a default argument is bound at
+    import time: with ``= get_llm`` the orchestrator captured the original
+    function, so patching the module attribute reached the supervisor and
+    silently missed every specialist. Half the graph was unstubable and the
+    docstring claimed otherwise.
     """
+    resolve: Callable[[], Any] = llm_factory if llm_factory is not None else lambda: get_llm()
     system_message = SystemMessage(content=spec.prompt)
     tool_list = list(spec.tools)
 
@@ -108,8 +123,22 @@ def build_specialist(
 
         error = ""
         try:
-            model = llm_factory().bind_tools(tool_list) if tool_list else llm_factory()
-            response: BaseMessage = model.invoke(normalize(messages))
+            base = resolve()
+            paced = with_effort(base, get_settings().specialist_effort)
+            model = paced.bind_tools(tool_list) if tool_list else paced
+            shaped = normalize(messages)
+            response: BaseMessage = model.invoke(shaped)
+
+            # A specialist is handed the same text as the router, so it is
+            # declined the same way - which is why routing a refused task to
+            # a specialist recovered nothing. Retried on a model measured to
+            # accept the input.
+            category = refusal_category(response)
+            fallback = get_settings().refusal_fallback_model
+            if category and fallback:
+                log.warning("%s declined (%s) - retrying on %s.", spec.name, category, fallback)
+                rescue = build_for(fallback)
+                response = (rescue.bind_tools(tool_list) if tool_list else rescue).invoke(shaped)
         except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
             log.error("%s reasoning failed: %s", spec.name, exc)
             # Recorded, not swallowed: `route` sends it back here with the error
@@ -117,19 +146,59 @@ def build_specialist(
             error = str(exc)
             response = AIMessage(content=f"{spec.name} failed: {exc}")
 
-        return {"messages": [response], "iterations": 1, "last_error": error}
+        # The budget counts tool-CALLING turns. Counting every reasoning turn
+        # meant a tool call and the thought that produced it each cost one, so
+        # six turns bought five tools and left nothing to report with - which
+        # is the whole reason the summarize node had to exist. A turn that
+        # produces an answer is free.
+        # A failed turn spends budget too, or the retry path never terminates:
+        # a provider failing every call emits no tool calls, so counting only
+        # those would loop until the recursion limit.
+        spent = 1 if (getattr(response, "tool_calls", None) or error) else 0
+        return {"messages": [response], "iterations": spent, "last_error": error}
+
+    def summarize(state: SpecialistState) -> dict[str, Any]:
+        """One last turn, without tools, so work already done gets reported.
+
+        The cap counts reasoning turns and every tool call consumes one, so a
+        specialist that downloaded, read and computed reached the ceiling with
+        nothing left to say what it found. The supervisor then saw a tool call
+        with empty content, concluded no answer had been produced, and
+        re-delegated - repeating the whole job at full price.
+        """
+        messages: list[BaseMessage] = [
+            system_message,
+            *state["messages"],
+            HumanMessage(content=SPECIALIST_WRAP_UP),
+        ]
+        try:
+            response: BaseMessage = resolve().invoke(normalize(messages))
+        except Exception as exc:  # noqa: BLE001 - a provider failure must not kill the run
+            log.error("%s could not summarise: %s", spec.name, exc)
+            response = AIMessage(content=f"{spec.name} ran out of steps before reporting.")
+        return {"messages": [response], "iterations": 0, "last_error": ""}
 
     def route(state: SpecialistState) -> str:
-        """Continue to tools, retry a failed call, or stop on the budget."""
-        if state.get("iterations", 0) >= spec.max_iterations:
-            log.warning("%s hit its iteration cap (%d) - stopping.", spec.name, spec.max_iterations)
+        """Continue to tools, retry a failed call, or wrap up on the budget.
+
+        Finished is checked BEFORE out-of-budget. The other order sent a
+        specialist that had just produced its answer on its last allowed turn
+        off to summarize anyway - an extra call that replaced a good answer
+        with a paraphrase of itself.
+        """
+        wants_tools = bool(getattr(state["messages"][-1], "tool_calls", None))
+        if not wants_tools and not state.get("last_error"):
             return END
+
+        if state.get("iterations", 0) >= spec.max_iterations:
+            log.warning(
+                "%s hit its tool budget (%d) - summarising.", spec.name, spec.max_iterations
+            )
+            return "summarize"
         if state.get("last_error"):
             log.info("%s retrying after: %s", spec.name, state["last_error"][:120])
             return "reason"
-        if getattr(state["messages"][-1], "tool_calls", None):
-            return "tools"
-        return END
+        return "tools"
 
     builder: StateGraph[SpecialistState] = StateGraph(SpecialistState)
     builder.add_node("reason", reason)
@@ -137,10 +206,14 @@ def build_specialist(
 
     if tool_list:
         builder.add_node("tools", ToolNode(tool_list))
+        builder.add_node("summarize", summarize)
         builder.add_conditional_edges(
-            "reason", route, {"tools": "tools", "reason": "reason", END: END}
+            "reason",
+            route,
+            {"tools": "tools", "reason": "reason", "summarize": "summarize", END: END},
         )
         builder.add_edge("tools", "reason")
+        builder.add_edge("summarize", END)
     else:
         builder.add_edge("reason", END)
 

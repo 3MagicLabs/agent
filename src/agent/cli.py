@@ -17,6 +17,7 @@ from typing import Any
 
 from agent.config import get_settings
 from agent.eval import AnswerCache, BenchmarkRunner, exact_match, score
+from agent.eval.scorers import GoldUnavailableError, gold_answers
 from agent.obs.logging import configure_logging
 from agent.obs.tracing import configure_tracing
 from agent.tools import capability_report
@@ -81,15 +82,33 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if summary.get("errors", 0) == 0 else 1
 
 
+def _load_gold(args: argparse.Namespace) -> dict[str, str]:
+    """Reference answers from a local file, or from the GAIA validation split."""
+    if args.gold:
+        loaded: dict[str, str] = json.loads(Path(args.gold).read_text(encoding="utf-8"))
+        return loaded
+    return gold_answers(args.level)
+
+
 def _score(args: argparse.Namespace) -> int:
-    gold = json.loads(Path(args.gold).read_text(encoding="utf-8"))
+    try:
+        gold = _load_gold(args)
+    except GoldUnavailableError as exc:
+        print(f"Cannot grade: {exc}", file=sys.stderr)
+        return 1
+
     predictions = AnswerCache().load()
+    # Only tasks we actually answered are graded, but the run is out of 20, so
+    # report both: 4/4 answered correct and 4/20 attempted are very different
+    # results and only one of them is the benchmark score.
     report = score(predictions, gold)
-    print(f"exact match: {report}")
+    print(f"exact match: {report}   ({report.correct}/{len(gold)} of the level set)")
 
     for task_id, expected in gold.items():
-        got = predictions.get(task_id, "<missing>")
-        hit = task_id in predictions and exact_match(got, expected)
+        if task_id not in predictions:
+            continue
+        got = predictions[task_id]
+        hit = exact_match(got, expected)
         print(f"  [{'PASS' if hit else 'FAIL'}] {task_id}: got {got!r} expected {expected!r}")
     return 0 if report.correct == report.graded else 1
 
@@ -122,7 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=_run)
 
     scorer = sub.add_parser("score", help="score cached answers against gold")
-    scorer.add_argument("--gold", required=True)
+    scorer.add_argument("--gold", help="JSON task_id -> answer; omit to fetch from GAIA")
+    scorer.add_argument("--level", type=int, default=1, help="GAIA level to grade against")
     scorer.set_defaults(func=_score)
 
     submit = sub.add_parser("submit", help="submit cached answers")

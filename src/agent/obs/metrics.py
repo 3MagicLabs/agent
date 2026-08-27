@@ -18,7 +18,13 @@ Status = str  # "ok" | "error" | "timeout"
 
 @dataclass(frozen=True, slots=True)
 class TaskMetric:
-    """One evaluated task. Immutable: build a new one to change anything."""
+    """One evaluated task. Immutable: build a new one to change anything.
+
+    The trailing fields exist so two runs can be told apart. ``metrics.jsonl``
+    is append-only and carried neither a timestamp nor a run id, so a file with
+    27 records for 20 tasks gave no way to say which run a record belonged to -
+    and no way to A/B a configuration change against its predecessor.
+    """
 
     task_id: str
     question: str
@@ -29,6 +35,14 @@ class TaskMetric:
     tokens: Mapping[str, int] = field(default_factory=dict)
     supervisor_steps: int = 0
     model: str = ""
+    #: Identifies the run this task belonged to.
+    run_id: str = ""
+    #: Wall-clock ISO 8601, so records can be ordered without relying on file
+    #: position - and so a run is findable in a trace UI by time.
+    recorded_at: str = ""
+    #: The configuration under test. Comparing two runs means comparing these.
+    effort: str = ""
+    cost_usd: float = 0.0
 
     def as_row(self) -> dict[str, Any]:
         return asdict(self)

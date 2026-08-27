@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool, tool
 from agent.config import get_settings
 from agent.obs.logging import get_logger
 from agent.tools.registry import ToolSpec, register
+from agent.tools.text import elide
 
 log = get_logger("tools.web")
 
@@ -103,16 +104,14 @@ def scrape_webpage(url: str) -> str:
 
         content_type = response.headers.get("content-type", "")
         if "html" not in content_type and "xml" not in content_type:
-            return str(response.text)[: settings.max_scrape_chars]
+            return elide(str(response.text), settings.max_scrape_chars)
 
         soup = BeautifulSoup(response.text, "html.parser")
         for element in soup(list(BOILERPLATE_TAGS)):
             element.extract()
 
         text = str(soup.get_text(separator="\n", strip=True))
-        if len(text) > settings.max_scrape_chars:
-            return text[: settings.max_scrape_chars] + "\n...[content truncated]"
-        return text
+        return elide(text, settings.max_scrape_chars)
     except requests.exceptions.Timeout:
         return f"Failed to scrape {url}: timed out after {settings.scrape_timeout_s}s."
     except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
@@ -148,16 +147,28 @@ def wikipedia_lookup(title: str) -> str:
         if not extracts:
             return f"No Wikipedia article found for {title!r}. Try web_search instead."
         text = "\n\n".join(extracts)
-        return text[: settings.max_scrape_chars]
+        return elide(text, settings.max_scrape_chars)
     except Exception as exc:  # noqa: BLE001 - surfaced to the model as a message
         log.error("wikipedia_lookup failed for %r: %s", title, exc)
         return f"Wikipedia lookup failed: {exc}"
 
 
-def _spec(name: str, tool_obj: BaseTool, capability: str, requires: tuple[str, ...]) -> ToolSpec:
-    return ToolSpec(name=name, capability=capability, factory=lambda: tool_obj, requires=requires)
+def _spec(
+    name: str,
+    tool_obj: BaseTool,
+    capability: str,
+    requires: tuple[str, ...],
+    cacheable: bool = False,
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        capability=capability,
+        factory=lambda: tool_obj,
+        requires=requires,
+        cacheable=cacheable,
+    )
 
 
-register(_spec("web_search", web_search, "search", ("has_search",)))
-register(_spec("scrape_webpage", scrape_webpage, "scrape", ()))
-register(_spec("wikipedia_lookup", wikipedia_lookup, "search", ()))
+register(_spec("web_search", web_search, "search", ("has_search",), cacheable=True))
+register(_spec("scrape_webpage", scrape_webpage, "scrape", (), cacheable=True))
+register(_spec("wikipedia_lookup", wikipedia_lookup, "search", (), cacheable=True))

@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +23,21 @@ import requests
 
 from agent.config import Settings, get_settings
 from agent.core.prompts import NO_ANSWER
+from agent.obs.budget import Budget, cost_of
 from agent.obs.logging import get_logger
 from agent.obs.metrics import MetricsRecorder, TaskMetric
 from agent.obs.tracing import total_tokens, usage_callback
+from agent.tools.cache import get_cache
+from agent.tools.files import set_current_task
 
 log = get_logger("eval.harness")
 
-AnswerFn = Callable[..., str]
+#: Returns either a bare answer string or an object carrying ``text`` and
+#: ``steps`` (``core.graph.Solution``). Typed loosely on purpose: naming the
+#: concrete type here would mean importing it, and resolving that import late is
+#: what keeps importing this module from building a model client. ``run_one``
+#: reads the result structurally and treats a plain string as zero steps.
+AnswerFn = Callable[..., Any]
 
 #: Floor for a per-task timeout derived from a nearly exhausted total budget.
 MIN_TASK_TIMEOUT_S = 1.0
@@ -151,14 +161,18 @@ class BenchmarkRunner:
         self.cache = cache or AnswerCache(self.settings.answer_cache)
         self.recorder = recorder or MetricsRecorder(self.settings.metrics_file)
         self._answer_fn = answer_fn
+        # metrics.jsonl is append-only and carried no run id, so a file with
+        # 27 records for 20 tasks gave no way to say which run a record
+        # belonged to - and no way to A/B a configuration change.
+        self.run_id = uuid.uuid4().hex[:8]
 
     @property
     def answer_fn(self) -> AnswerFn:
         """Resolved late so importing the harness never builds a model client."""
         if self._answer_fn is None:
-            from agent.core.graph import answer_question
+            from agent.core.graph import solve_question
 
-            resolved: AnswerFn = answer_question
+            resolved: AnswerFn = solve_question
             self._answer_fn = resolved
         return self._answer_fn
 
@@ -180,6 +194,13 @@ class BenchmarkRunner:
         question = str(item.get("question", ""))
         limit = timeout_s if timeout_s is not None else self.settings.per_question_timeout_s
         handler = usage_callback()
+        # Tool results are memoised per task. Tools are built once, with the
+        # orchestrator, so without this every entry would live as long as the
+        # process - and a Space runs for days.
+        get_cache().new_generation()
+        # Tools cannot be passed the task id - it would land in the schema
+        # the model sees - so it is declared here instead.
+        set_current_task(task_id)
         started = time.monotonic()
 
         executor = ThreadPoolExecutor(max_workers=1)
@@ -190,14 +211,20 @@ class BenchmarkRunner:
                 task_id,
                 [handler] if handler else None,
             )
-            answer = str(future.result(timeout=limit))
+            result = future.result(timeout=limit)
+            # Read structurally rather than importing Solution: resolving the
+            # answer function late is what keeps importing this module from
+            # building a model client, and an eager import would undo that.
+            # A plain string (what tests inject) reports no steps.
+            answer = str(getattr(result, "text", result))
+            steps = int(getattr(result, "steps", 0))
             status, error = "ok", ""
         except FutureTimeout:
             log.error("[%s] timed out after %.0fs", task_id, limit)
-            answer, status, error = "", "timeout", f"exceeded {limit:.0f}s"
+            answer, steps, status, error = "", 0, "timeout", f"exceeded {limit:.0f}s"
         except Exception as exc:
             log.exception("[%s] failed", task_id)
-            answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
+            answer, steps, status, error = "", 0, "error", f"{type(exc).__name__}: {exc}"
         finally:
             # Never wait: a hung task must not block the rest of the batch.
             executor.shutdown(wait=False)
@@ -207,6 +234,7 @@ class BenchmarkRunner:
             if reason:
                 status, error = "error", reason
 
+        tokens = total_tokens(handler)
         return TaskMetric(
             task_id=task_id,
             question=question,
@@ -214,8 +242,13 @@ class BenchmarkRunner:
             status=status,
             error=error,
             latency_s=round(time.monotonic() - started, 2),
-            tokens=total_tokens(handler),
+            tokens=tokens,
+            supervisor_steps=steps,
             model=self.settings.model,
+            run_id=self.run_id,
+            recorded_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            effort=self.settings.specialist_effort or "default",
+            cost_usd=round(cost_of(tokens, self.settings.model), 6),
         )
 
     def pause_for(self, metric: TaskMetric) -> float:
@@ -244,6 +277,10 @@ class BenchmarkRunner:
         answers = self.cache.load() if reuse_cache else {}
         started = time.monotonic()
         total = len(items)
+        budget = Budget(
+            max_run_usd=self.settings.max_run_cost_usd,
+            max_task_usd=self.settings.max_task_cost_usd,
+        )
 
         for index, item in enumerate(items, start=1):
             task_id = str(item.get("task_id", ""))
@@ -277,6 +314,26 @@ class BenchmarkRunner:
             if metric.status == "ok":
                 answers = {**answers, task_id: metric.answer}
                 self.cache.save(answers)
+
+            # Charged after the fact rather than estimated before it. A single
+            # task is already bounded by its timeout, so the job here is to
+            # stop the *next* one - and stopping is the point: a spent budget
+            # must never quietly become a cheaper, worse run.
+            spend = metric.cost_usd
+            budget = budget.charge(spend)
+            reason = budget.task_overspend(spend) or budget.run_overspend()
+            if budget.enabled and reason:
+                yield Progress(
+                    index=index,
+                    total=total,
+                    message=(
+                        f"Stopped after {index}/{total}: {reason}. "
+                        f"Cached answers are still submittable."
+                    ),
+                    metric=metric,
+                    done=True,
+                )
+                return
 
             yield Progress(
                 index=index,

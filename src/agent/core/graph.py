@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -19,9 +20,15 @@ from pydantic import BaseModel, Field, create_model
 
 from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
-from agent.core.conversation import normalize, text_of
-from agent.core.llm import get_llm
-from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
+from agent.core.conversation import as_data, normalize, refusal_category, text_of
+from agent.core.llm import build_for, get_llm, with_effort
+from agent.core.prompts import (
+    FINALIZER,
+    FINALIZER_REQUEST,
+    ROSTER_MARKER,
+    ROUTER_REQUEST,
+    SUPERVISOR,
+)
 from agent.core.state import SupervisorState, initial_supervisor_state
 from agent.obs.logging import get_logger
 from agent.obs.tracing import trace_config
@@ -31,6 +38,22 @@ log = get_logger("core.graph")
 
 FINISH = "FINISH"
 FINAL_ANSWER = "final_answer"
+
+#: A safety classifier declined the request. Arrives as a normal 200 with an
+#: empty body, so it is only visible in stop_reason - and it is deterministic,
+#: unlike a malformed reply, so retrying only buys another refusal.
+REFUSAL = "refusal"
+
+#: Where to send a task the router was not permitted to read. The refusal is
+#: on the router's call; a specialist prompts differently and may not trip the
+#: same classifier. code_agent because text the router could not parse is
+#: usually encoded, and decoding is what it is for.
+REFUSAL_FALLBACK = "code_agent"
+
+REFUSAL_INSTRUCTION = (
+    "The router was not permitted to read this task, so it could not be "
+    "classified. Work directly from the task text."
+)
 
 
 class RouteDecision(BaseModel):
@@ -58,9 +81,16 @@ def build_route_model(specs: tuple[SpecialistSpec, ...]) -> type[BaseModel]:
 
 
 def routing_prompt(specs: tuple[SpecialistSpec, ...]) -> str:
-    """Supervisor prompt with the live specialist roster appended."""
-    roster = "\n".join(f"- '{spec.name}': {spec.description}." for spec in specs)
-    return f"{SUPERVISOR}\n\nAvailable specialists:\n{roster}"
+    """Supervisor prompt with the live specialist roster substituted in.
+
+    Substituted rather than appended, and into the routing section rather
+    than after the closing tag. The prompt used to carry its own hand-written
+    roster as well, and the two drifted: one said web_agent reads webpages,
+    the generated one said it also downloads attachments, and the examples
+    sent attachments to code_agent instead. The specs are now the only source.
+    """
+    roster = "\n".join(f"- {spec.name}: {spec.description}." for spec in specs)
+    return SUPERVISOR.replace(ROSTER_MARKER, roster)
 
 
 def trim(messages: list[BaseMessage], keep: int) -> list[BaseMessage]:
@@ -100,6 +130,20 @@ def clean_answer(text: str) -> str:
     return cleaned or text.strip()
 
 
+@dataclass(frozen=True, slots=True)
+class Solution:
+    """An answer together with what it cost to reach.
+
+    ``steps`` is the delegation count. It was declared on ``TaskMetric`` from
+    the start but stayed 0 in all 59 recorded runs, because the only way out of
+    the graph returned a bare string and the count lived in state that was
+    thrown away.
+    """
+
+    text: str
+    steps: int = 0
+
+
 class Orchestrator:
     """Compiled supervisor graph bound to a settings snapshot."""
 
@@ -125,23 +169,84 @@ class Orchestrator:
             return {"next_agent": FINISH, "steps": 1}
 
         messages = normalize(
-            [self._system, *trim(list(state["messages"]), self.settings.history_window)],
+            [
+                self._system,
+                *as_data(trim(list(state["messages"]), self.settings.history_window)),
+            ],
             ROUTER_REQUEST,
         )
-        try:
-            router = get_llm().with_structured_output(self._route_model, method="function_calling")
-            # Typed Any deliberately. with_structured_output declares a
-            # non-Optional return, which would make the None check below
-            # unreachable - but that is a promise about a well-behaved provider,
-            # and this codebase exists because providers return things their
-            # type signatures did not predict.
-            decision: Any = router.invoke(messages)
-        except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
-            log.error("Routing failed (%s) - finishing with what we have.", exc)
-            return {"next_agent": FINISH, "steps": 1}
+        # Capped like the finalizer: the router emits one schema selection
+        # and a short justification, so it never needs a specialist's room.
+        capped = get_llm().bind(max_tokens=self.settings.max_router_tokens)
+        # include_raw, because the default discards the reply and raises on a
+        # parse failure - so a policy refusal, which carries its cause in
+        # stop_reason, arrived here as a pydantic "field required" error.
+        router = with_effort(capped, self.settings.router_effort).with_structured_output(
+            self._route_model, method="function_calling", include_raw=True
+        )
+        # Retried once, because a malformed reply is usually a hiccup. A refusal
+        # is not: it is deterministic, and the first version of this loop spent
+        # two round trips being declined identically before giving up.
+        #
+        # Typed Any deliberately. with_structured_output declares a non-Optional
+        # return, which would make the None checks unreachable - but that is a
+        # promise about a well-behaved provider, and this codebase exists
+        # because providers return things their type signatures did not predict.
+        decision: Any = None
+        for attempt in (1, 2):
+            try:
+                result: Any = router.invoke(messages)
+            except Exception as exc:  # noqa: BLE001 - a bad tool call must not kill the run
+                log.warning("Routing attempt %d failed: %s", attempt, exc)
+                continue
+
+            decision = (result or {}).get("parsed")
+            if decision is not None:
+                break
+
+            category = refusal_category((result or {}).get("raw"))
+            if category and self.settings.refusal_fallback_model:
+                # Retried on another model rather than routed blind. The
+                # refusal is a classifier decision on the input and
+                # classifiers differ between models: haiku answers text
+                # sonnet and opus both decline. One call, only when declined.
+                log.warning(
+                    "Routing declined (%s) - retrying on %s.",
+                    category,
+                    self.settings.refusal_fallback_model,
+                )
+                rescued = self._route_with(self.settings.refusal_fallback_model, messages)
+                if rescued is not None:
+                    decision = rescued
+                    break
+            if category:
+                # Once only - but keyed on "a refusal already happened", not
+                # on the round number. The first version used step > 0, which
+                # conflates the two: a task that routes normally and is then
+                # refused at round 1 would skip the recovery path entirely,
+                # which is the one case it exists for.
+                if state.get("instruction") == REFUSAL_INSTRUCTION:
+                    log.error("Routing declined by policy (%s) again - finishing.", category)
+                    return {"next_agent": FINISH, "steps": 1}
+                target = self._refusal_route()
+                log.warning(
+                    "Routing declined by policy (%s) - sending to %s unclassified.",
+                    category,
+                    target,
+                )
+                return {
+                    "next_agent": target,
+                    "instruction": REFUSAL_INSTRUCTION,
+                    "steps": 1,
+                }
+            log.warning(
+                "Routing attempt %d produced no decision: %s",
+                attempt,
+                (result or {}).get("parsing_error"),
+            )
 
         if decision is None:
-            log.error("Router returned no decision - finishing.")
+            log.error("Router returned no usable decision - finishing with what we have.")
             return {"next_agent": FINISH, "steps": 1}
 
         target = str(getattr(decision, "next_agent", FINISH))
@@ -149,16 +254,43 @@ class Orchestrator:
         log.info("step %d/%d -> %s (%s)", step + 1, budget, target, instruction)
         return {"next_agent": target, "instruction": instruction, "steps": 1}
 
+    def _route_with(self, model_name: str, messages: list[BaseMessage]) -> Any:
+        """One routing attempt on another model, or None if that fails too.
+
+        Takes a name rather than a client so that building the client is
+        inside the guard: constructing it can raise (no credentials for that
+        model, an unknown name), and an argument is evaluated before the call
+        that was meant to protect it.
+        """
+        try:
+            capped = build_for(model_name).bind(max_tokens=self.settings.max_router_tokens)
+            router = capped.with_structured_output(
+                self._route_model, method="function_calling", include_raw=True
+            )
+            result: Any = router.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 - the fallback is best-effort
+            log.warning("Fallback routing on %s failed: %s", model_name, exc)
+            return None
+        return (result or {}).get("parsed")
+
+    def _refusal_route(self) -> str:
+        """Where an unclassifiable task goes. FINISH only if nothing can run."""
+        names = [spec.name for spec in self.specs]
+        if REFUSAL_FALLBACK in names:
+            return REFUSAL_FALLBACK
+        return names[0] if names else FINISH
+
     def _make_specialist_node(self, name: str) -> Callable[[SupervisorState], dict[str, Any]]:
         """Wrap a specialist subgraph as a supervisor node."""
         subgraph = self._subgraphs[name]
+        has_tools = bool(next(s for s in self.specs if s.name == name).tools)
 
         def node(state: SupervisorState) -> dict[str, Any]:
             seeded = trim(list(state["messages"]), 4)
             # A specialist gets a fresh state on every delegation, so it has no
             # memory of work it already did. Pushing the inventory is what stops
             # the second delegation re-fetching what the first one downloaded.
-            inventory = downloaded_inventory()
+            inventory = downloaded_inventory(state.get("task_id", ""))
             if inventory:
                 seeded = [*seeded, SystemMessage(content=inventory)]
             # The router already generated a justification for this delegation
@@ -177,7 +309,7 @@ class Orchestrator:
                 # produced nothing echoes its own input back - double-tagged.
                 appended = list(result["messages"])[len(seeded) :]
                 content = last_text(appended)
-                evidence = tool_evidence(appended)
+                evidence = tool_evidence(appended, has_tools=has_tools)
             except Exception as exc:  # noqa: BLE001 - one specialist failing is recoverable
                 log.error("%s failed: %s", name, exc)
                 content = f"{name} failed with error: {exc}"
@@ -203,12 +335,28 @@ class Orchestrator:
         ]
         # Capped: the answer is a few words, and an uncapped repetition loop
         # once emitted 4,344 tokens of a single sentence repeated.
-        finalizer = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
+        capped = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
+        finalizer = with_effort(capped, self.settings.finalizer_effort)
+        shaped = normalize(messages)
         try:
+            reply = finalizer.invoke(shaped)
+
+            # The transcript carries the task text, so the finalizer is declined
+            # by the same classifier as the router and the specialist. Wiring the
+            # retry into those two and not this one left a task that had been
+            # solved - the specialist reversed the text and answered "right" -
+            # ending with an empty final answer.
+            category = refusal_category(reply)
+            fallback = self.settings.refusal_fallback_model
+            if category and fallback:
+                log.warning("Finalizer declined (%s) - retrying on %s.", category, fallback)
+                rescue = build_for(fallback).bind(max_tokens=self.settings.max_answer_tokens)
+                reply = rescue.invoke(shaped)
+
             # text_of, not str(...content): with thinking enabled the content is
             # a list of typed blocks, and str() over it yields the repr - which
             # once shipped `[{'signature': 'EsEECpAB...` as a final answer.
-            content = clean_answer(text_of(finalizer.invoke(normalize(messages))))
+            content = clean_answer(text_of(reply))
         except Exception as exc:
             log.error("Finalizer failed: %s", exc)
             raise
@@ -242,18 +390,31 @@ class Orchestrator:
         return builder.compile()
 
     # --- public API ----------------------------------------------------
+    def solve(
+        self, question: str, task_id: str = "local", callbacks: list[Any] | None = None
+    ) -> Solution:
+        """Run the graph on one question and return the answer with its cost.
+
+        ``answer()`` returns only the text, which is all the app and CLI need.
+        The harness needs the delegation count too: iteration caps and timeouts
+        should be set from the distribution of successful runs, and that was
+        unobservable while every metric record reported zero steps.
+        """
+        final_state = self.graph.invoke(
+            initial_supervisor_state([HumanMessage(content=question)], task_id),
+            config=trace_config(task_id, callbacks),
+        )
+        steps = int(final_state.get("steps", 0))
+        for message in reversed(list(final_state["messages"])):
+            if getattr(message, "name", "") == FINAL_ANSWER:
+                return Solution(text=str(message.content).strip(), steps=steps)
+        return Solution(text="", steps=steps)
+
     def answer(
         self, question: str, task_id: str = "local", callbacks: list[Any] | None = None
     ) -> str:
         """Run the graph on one question and return the final answer text."""
-        final_state = self.graph.invoke(
-            initial_supervisor_state([HumanMessage(content=question)]),
-            config=trace_config(task_id, callbacks),
-        )
-        for message in reversed(list(final_state["messages"])):
-            if getattr(message, "name", "") == FINAL_ANSWER:
-                return str(message.content).strip()
-        return ""
+        return self.solve(question, task_id=task_id, callbacks=callbacks).text
 
 
 @lru_cache(maxsize=1)
@@ -272,3 +433,10 @@ def answer_question(
 ) -> str:
     """Convenience entry point used by the app, CLI and eval harness."""
     return get_orchestrator().answer(question, task_id=task_id, callbacks=callbacks)
+
+
+def solve_question(
+    question: str, task_id: str = "local", callbacks: list[Any] | None = None
+) -> Solution:
+    """Like answer_question, but keeps the delegation count."""
+    return get_orchestrator().solve(question, task_id=task_id, callbacks=callbacks)

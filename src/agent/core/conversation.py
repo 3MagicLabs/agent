@@ -23,6 +23,24 @@ from langchain_core.messages import (
 CONTINUE = "Continue."
 
 
+REFUSAL = "refusal"
+
+
+def refusal_category(reply: object) -> str:
+    """The category when a reply was declined by policy, else "".
+
+    A refusal is a *successful* response - HTTP 200, empty content, zero
+    output tokens - with the outcome carried in stop_reason. Read content
+    first and it is indistinguishable from an empty reply, which is how a
+    policy decision once reached the router as "next_agent Field required".
+    """
+    metadata = getattr(reply, "response_metadata", None) or {}
+    if metadata.get("stop_reason") != REFUSAL:
+        return ""
+    details = metadata.get("stop_details") or {}
+    return str(details.get("category") or "unspecified")
+
+
 def text_of(message: BaseMessage) -> str:
     """The readable text of a message, whatever shape its content is in.
 
@@ -84,6 +102,74 @@ def ends_with_request(
     return conversation
 
 
+def as_data(messages: Sequence[BaseMessage], tag: str = "task") -> list[BaseMessage]:
+    """Delimit the opening human turn so it reads as data, not instruction.
+
+    A benchmark question is arbitrary text and some of it is imperative. One
+    task is a reversed sentence that decodes to "If you understand this
+    sentence, write the opposite of the word 'left' as the answer" - and the
+    router obeyed it, replying "right" as prose instead of calling the routing
+    function. With no tool call to parse, the structured output came back as
+    {}, twice, deterministically, and the task was lost.
+
+    The router's job is to pick a specialist, never to answer. Wrapping the
+    question marks where the instructions addressed to *it* end and the material
+    it is routing begins. Specialists are not wrapped: following the task is
+    precisely what they are for.
+    """
+    conversation = list(messages)
+    for index, message in enumerate(conversation):
+        if isinstance(message, HumanMessage):
+            conversation[index] = HumanMessage(content=f"<{tag}>\n{text_of(message)}\n</{tag}>")
+            break
+    return conversation
+
+
+def drop_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Remove tool calls that were never executed.
+
+    Anthropic requires every ``tool_use`` block to be followed immediately by
+    its ``tool_result``: otherwise the request is rejected outright with
+    "`tool_use` ids were found without `tool_result` blocks immediately
+    after".
+
+    A specialist that exhausts its iteration budget mid-decision leaves
+    exactly that shape - the model asked for a tool, the loop stopped before
+    running it - so the wrap-up turn crashed on a 400 every time it was
+    needed. The requests are dropped rather than answered with synthetic
+    results: they did not run, and inventing results would be a lie the model
+    then reasons from.
+
+    Position matters and the first version of this got it wrong: it popped only
+    from the end, but ``summarize`` appends its own request after the
+    transcript, so the unresolved call sits second-to-last and was skipped. The
+    check has to be by *pairing*, not by position.
+    """
+    resolved = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id
+    }
+
+    kept: list[BaseMessage] = []
+    still_requested: set[str] = set()
+    for message in messages:
+        requested = [str(call.get("id")) for call in getattr(message, "tool_calls", None) or []]
+        if requested and not all(call in resolved for call in requested):
+            continue
+        still_requested.update(requested)
+        kept.append(message)
+
+    # Dropping a request orphans its results, which is the mirror-image
+    # rejection: a tool_result with no preceding tool_use. Removing only one
+    # half of a pair trades one 400 for another.
+    return [
+        message
+        for message in kept
+        if not isinstance(message, ToolMessage) or message.tool_call_id in still_requested
+    ]
+
+
 def normalize(messages: Sequence[BaseMessage], request: str = CONTINUE) -> list[BaseMessage]:
     """Shape a message list so any supported provider will accept it."""
-    return ends_with_request(merge_system(messages), request)
+    return ends_with_request(drop_dangling_tool_calls(merge_system(messages)), request)

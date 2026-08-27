@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -36,28 +36,60 @@ CREDENTIAL_VARS = (
 
 
 class StubRouter:
-    """Stands in for ``llm.with_structured_output(...)``."""
+    """Stands in for ``llm.with_structured_output(..., include_raw=True)``.
 
-    def __init__(self, model_cls: type, next_agent: str, reasoning: str = "stub") -> None:
+    Returns the {"raw", "parsed", "parsing_error"} envelope rather than the
+    parsed object. The graph reads ``raw`` to tell a policy refusal - a 200
+    with an empty body and stop_reason "refusal" - from a merely malformed
+    reply, because one is worth retrying and the other never is.
+
+    ``refusal`` makes the stub decline, so that branch is testable offline.
+    """
+
+    def __init__(
+        self,
+        model_cls: type,
+        next_agent: str,
+        reasoning: str = "stub",
+        refusal: str = "",
+    ) -> None:
         self._model_cls = model_cls
         self._next_agent = next_agent
         self._reasoning = reasoning
+        self._refusal = refusal
+        self.calls = 0
 
     def invoke(self, _messages: Sequence[BaseMessage]) -> Any:
-        return self._model_cls(next_agent=self._next_agent, reasoning=self._reasoning)
+        self.calls += 1
+        if self._refusal:
+            declined = AIMessage(
+                content="",
+                response_metadata={
+                    "stop_reason": "refusal",
+                    "stop_details": {"type": "refusal", "category": self._refusal},
+                },
+            )
+            return {"raw": declined, "parsed": None, "parsing_error": None}
+        parsed = self._model_cls(next_agent=self._next_agent, reasoning=self._reasoning)
+        return {"raw": AIMessage(content=""), "parsed": parsed, "parsing_error": None}
 
 
 class StubLLM:
     """Deterministic chat model. ``route_to`` drives the supervisor's choice."""
 
-    def __init__(self, reply: str = "stub answer", route_to: str = "FINISH") -> None:
+    def __init__(
+        self, reply: str = "stub answer", route_to: str = "FINISH", refusal: str = ""
+    ) -> None:
         self.reply = reply
         self.route_to = route_to
+        self.refusal = refusal
+        self.router: StubRouter | None = None
         self.calls: list[list[BaseMessage]] = []
         self.bound: dict[str, Any] = {}
 
     def with_structured_output(self, model_cls: type, **_kwargs: Any) -> StubRouter:
-        return StubRouter(model_cls, self.route_to)
+        self.router = StubRouter(model_cls, self.route_to, refusal=self.refusal)
+        return self.router
 
     def bind_tools(self, _tools: Any, **_kwargs: Any) -> StubLLM:
         return self
@@ -96,9 +128,16 @@ def clean_env(monkeypatch, tmp_path):
     reset_settings()
     set_settings(Settings(log_dir=tmp_path / "logs", download_dir=tmp_path / "downloads"))
 
-    from agent.tools.files import _dataset_index
+    from agent.tools.cache import get_cache
+    from agent.tools.files import _INDEX, set_current_task
 
-    _dataset_index.cache_clear()  # a listing cached under other settings must not leak
+    # Module-level state that outlives a test the way it outlives a task.
+    # Without these resets a suite-order change silently alters results:
+    # set_current_task leaking from a harness test made a sandbox-upload
+    # test pass alone and fail in the full run.
+    _INDEX.clear()  # a listing cached under other settings must not leak
+    set_current_task("")
+    get_cache().clear()
     yield
     reset_settings()
 
@@ -114,8 +153,10 @@ def settings():
 def stub_llm(monkeypatch):
     """Install a StubLLM everywhere the graph resolves a model."""
 
-    def _install(reply: str = "stub answer", route_to: str = "FINISH") -> StubLLM:
-        llm = StubLLM(reply=reply, route_to=route_to)
+    def _install(
+        reply: str = "stub answer", route_to: str = "FINISH", refusal: str = ""
+    ) -> StubLLM:
+        llm = StubLLM(reply=reply, route_to=route_to, refusal=refusal)
         monkeypatch.setattr("agent.core.graph.get_llm", lambda: llm)
         monkeypatch.setattr("agent.agents.base.get_llm", lambda: llm)
         return llm
@@ -132,3 +173,81 @@ def failing_llm(monkeypatch):
         return llm
 
     return _install
+
+
+class ContractViolationError(RuntimeError):
+    """What the provider returns as a 400 for a malformed conversation."""
+
+
+class ToolCallingLLM:
+    """A stub that emits tool calls AND enforces the provider's message rules.
+
+    Every other stub here models a *cooperative* provider: it returns text and
+    inspects nothing. That is why an entire class of bug was invisible - the
+    real provider is the only component that enforces the rules
+    ``core.conversation`` exists to satisfy, so a call site could violate them
+    and every test still passed. Four bugs shipped that way, two of them twice.
+
+    ``script`` is a list of tool names to request, one per call; after it is
+    exhausted the stub answers with ``reply``. Set ``validate=False`` to check
+    that a rule really is what fails a test.
+    """
+
+    def __init__(
+        self,
+        script: Sequence[str] = (),
+        reply: str = "done",
+        validate: bool = True,
+    ) -> None:
+        self.script = list(script)
+        self.reply = reply
+        self.validate = validate
+        self.calls: list[list[BaseMessage]] = []
+        self._issued = 0
+
+    def bind_tools(self, _tools: Any, **_kwargs: Any) -> ToolCallingLLM:
+        return self
+
+    def bind(self, **_kwargs: Any) -> ToolCallingLLM:
+        return self
+
+    def _check(self, messages: Sequence[BaseMessage]) -> None:
+        """The three rules the real provider rejects a request for."""
+        systems = [i for i, m in enumerate(messages) if isinstance(m, SystemMessage)]
+        if len(systems) > 1:
+            raise ContractViolationError("Received multiple non-consecutive system messages.")
+        if systems and systems[0] != 0:
+            raise ContractViolationError("A system message must lead the conversation.")
+
+        if messages and isinstance(messages[-1], AIMessage):
+            raise ContractViolationError("This model does not support assistant message prefill.")
+
+        resolved = {
+            m.tool_call_id for m in messages if isinstance(m, ToolMessage) and m.tool_call_id
+        }
+        requested: set[str] = set()
+        for message in messages:
+            for call in getattr(message, "tool_calls", None) or []:
+                identifier = str(call.get("id"))
+                requested.add(identifier)
+                if identifier not in resolved:
+                    raise ContractViolationError(
+                        f"`tool_use` ids were found without `tool_result` blocks "
+                        f"immediately after: {identifier}"
+                    )
+        for orphan in resolved - requested:
+            raise ContractViolationError(f"`tool_result` block with no `tool_use`: {orphan}")
+
+    def invoke(self, messages: Sequence[BaseMessage], **_kwargs: Any) -> AIMessage:
+        self.calls.append(list(messages))
+        if self.validate:
+            self._check(messages)
+
+        if self._issued < len(self.script):
+            name = self.script[self._issued]
+            self._issued += 1
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": name, "args": {}, "id": f"call-{self._issued}"}],
+            )
+        return AIMessage(content=self.reply)

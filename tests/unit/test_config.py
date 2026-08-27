@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
-from agent.config import Settings, get_settings, load_settings, reset_settings
+from agent.config import PROVIDER_DEFAULTS, Settings, get_settings, load_settings, reset_settings
 from agent.core.llm import MissingCredentialsError, build_llm
 
 pytestmark = pytest.mark.unit
@@ -181,7 +184,106 @@ class TestDefaults:
         correct answer.
         """
         settings = Settings()
-        calls = settings.max_supervisor_steps * settings.max_web_iterations
+        calls = settings.max_supervisor_steps * max(
+            settings.max_web_iterations, settings.max_code_iterations
+        )
 
-        assert settings.per_question_timeout_s >= calls * 20.0
+        # 8s per call, measured: five real tasks averaged 2-4s per LLM call
+        # against Anthropic. The original 20s came from Groq, where every
+        # call carried throttling - and like the token limits and the pacer,
+        # it outlived the provider it was measured on.
+        assert settings.per_question_timeout_s >= calls * 8.0
         assert settings.total_budget_s >= settings.per_question_timeout_s
+
+
+class TestEffort:
+    def test_the_router_does_not_run_at_the_lowest_effort(self):
+        """At "low" it returned an empty object - 0 output tokens, no fields -
+        and the pydantic validation failure ended a task that had succeeded on
+        every previous run. A component that must emit valid structured output
+        has to earn the right to be cheap."""
+        assert Settings().router_effort != "low"
+
+    def test_the_specialist_runs_at_medium(self):
+        """Level-1 tasks are lookups and small computations, not deep
+        reasoning. Set explicitly so a metric records a configuration under
+        test rather than "whatever the provider chose"."""
+        assert Settings().specialist_effort == "medium"
+
+    def test_every_role_has_a_valid_effort(self):
+        """An unknown value is dropped with a warning, so a typo here would
+        silently run at the provider default instead of the intended one."""
+        from agent.core.llm import EFFORTS
+
+        settings = Settings()
+        for role in ("router_effort", "specialist_effort", "finalizer_effort"):
+            assert getattr(settings, role) in EFFORTS, role
+
+    def test_effort_is_overridable_for_experiments(self, monkeypatch):
+        monkeypatch.setenv("SPECIALIST_EFFORT", "low")
+
+        assert load_settings().specialist_effort == "low"
+
+
+def _same(documented: str, actual: object) -> bool:
+    """Compare numerically where possible - "5.00" and 5.0 are the same default."""
+    try:
+        return float(documented) == float(actual)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return documented == str(actual)
+
+
+class TestDocumentedDefaults:
+    """Every tunable default must match what the documentation claims.
+
+    Eighteen commits changed eight defaults and touched zero lines of
+    documentation, so docs/configuration.md described a configuration that had
+    not existed for a day - including a retired model and a pacing value from a
+    provider no longer in use. Prose cannot be trusted to track code by
+    intention; this makes it fail instead.
+    """
+
+    DOC = Path("docs/configuration.md")
+
+    def _documented(self) -> dict[str, str]:
+        """Variable -> default, parsed from the markdown tables."""
+        rows = re.findall(r"^\|\s*`([A-Z_]+)`\s*\|\s*`([^`]*)`", self.DOC.read_text(), re.M)
+        return dict(rows)
+
+    @pytest.mark.parametrize(
+        ("variable", "field"),
+        [
+            ("MAX_SUPERVISOR_STEPS", "max_supervisor_steps"),
+            ("MAX_WEB_ITERATIONS", "max_web_iterations"),
+            ("MAX_CODE_ITERATIONS", "max_code_iterations"),
+            ("HISTORY_WINDOW", "history_window"),
+            ("PER_QUESTION_TIMEOUT_S", "per_question_timeout_s"),
+            ("TOTAL_BUDGET_S", "total_budget_s"),
+            ("MAX_ANSWER_TOKENS", "max_answer_tokens"),
+            ("MAX_ROUTER_TOKENS", "max_router_tokens"),
+            ("MAX_SPECIALIST_TOKENS", "max_specialist_tokens"),
+            ("TOKENS_PER_MINUTE", "tokens_per_minute"),
+            ("MAX_TASK_COST_USD", "max_task_cost_usd"),
+            ("MAX_RUN_COST_USD", "max_run_cost_usd"),
+            ("MAX_SCRAPE_CHARS", "max_scrape_chars"),
+            ("MAX_FILE_CHARS", "max_file_chars"),
+            ("MAX_CODE_OUTPUT_CHARS", "max_code_output_chars"),
+            ("SEARCH_RESULTS", "search_results"),
+            ("ROUTER_EFFORT", "router_effort"),
+            ("SPECIALIST_EFFORT", "specialist_effort"),
+            ("FINALIZER_EFFORT", "finalizer_effort"),
+        ],
+    )
+    def test_the_documented_default_is_the_real_one(self, variable, field):
+        documented = self._documented().get(variable)
+        actual = getattr(Settings(), field)
+
+        assert documented is not None, f"{variable} is undocumented"
+        assert _same(
+            documented, actual
+        ), f"{variable}: docs say {documented!r}, code says {actual!r}"
+
+    def test_the_configured_model_is_documented(self):
+        documented = self._documented().get("ANTHROPIC_MODEL")
+
+        assert documented == PROVIDER_DEFAULTS["anthropic"][0]

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
 from agent.config import Settings, set_settings
+from agent.core.graph import Solution
 from agent.core.prompts import FINALIZER, NO_ANSWER
+from agent.eval import harness
 from agent.eval.harness import AnswerCache, BenchmarkRunner, build_prompt, rejection_reason
 from agent.obs.metrics import TaskMetric
 
@@ -284,3 +287,133 @@ class TestNoAnswerSentinel:
         """Guard against the 'give your single best guess anyway' line returning."""
         assert NO_ANSWER in FINALIZER
         assert "best guess" not in FINALIZER.lower()
+
+
+class TestSupervisorSteps:
+    """The delegation count must reach the metric record.
+
+    It was declared on TaskMetric from the start and stayed 0 across all 59
+    recorded runs, because the only way out of the graph returned a bare string.
+    Iteration caps and timeouts should be set from the distribution of
+    successful runs; that distribution was unobservable.
+    """
+
+    def test_a_solution_carries_its_step_count(self):
+        runner = make_runner(lambda _q, _t, _c: Solution(text="42", steps=3))
+
+        metric = runner.run_one(QUESTIONS[0])
+
+        assert metric.answer == "42"
+        assert metric.supervisor_steps == 3
+
+    def test_a_plain_string_still_works_and_reports_no_steps(self):
+        """Injected stubs and any older caller return a bare string."""
+        metric = make_runner(lambda _q, _t, _c: "42").run_one(QUESTIONS[0])
+
+        assert metric.answer == "42"
+        assert metric.supervisor_steps == 0
+
+    def test_a_failure_records_no_steps(self):
+        def boom(*_args):
+            raise RuntimeError("provider down")
+
+        metric = make_runner(boom).run_one(QUESTIONS[0])
+
+        assert metric.status == "error"
+        assert metric.supervisor_steps == 0
+
+
+class TestSpendCeilings:
+    """A paid provider has no involuntary cap; this is the only one."""
+
+    def _costly(self, tokens: int):
+        """An answer function whose usage the recorder will price."""
+        return lambda _q, _t, _c: Solution(text="x", steps=1)
+
+    def test_a_run_stops_when_the_total_ceiling_is_reached(self, settings, monkeypatch):
+        capped = replace(settings, max_run_cost_usd=0.01, max_task_cost_usd=0.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.02)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].done
+        assert "at the $0.01 ceiling" in events[-1].message
+        assert "still submittable" in events[-1].message
+
+    def test_one_runaway_task_stops_the_run_on_its_own(self, settings, monkeypatch):
+        """A per-run ceiling alone would let a single expensive task through."""
+        capped = replace(settings, max_run_cost_usd=1000.0, max_task_cost_usd=0.01)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.02)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].done
+        assert "per-task ceiling" in events[-1].message
+
+    def test_an_affordable_run_is_untouched(self, settings, monkeypatch):
+        capped = replace(settings, max_run_cost_usd=100.0, max_task_cost_usd=1.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=capped)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.001)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        assert events[-1].message.startswith("Run complete")
+
+    def test_zero_ceilings_disable_accounting(self, settings, monkeypatch):
+        free = replace(settings, max_run_cost_usd=0.0, max_task_cost_usd=0.0)
+        runner = make_runner(lambda _q, _t, _c: "x", settings=free)
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 999.0)
+
+        events = list(runner.run(QUESTIONS, reuse_cache=False))
+
+        # Asserting on structure, not on a substring of a message that
+        # embeds a tmp_path named after this very test.
+        assert events[-1].message.startswith("Run complete")
+
+
+class TestRunLabelling:
+    """Two runs must be distinguishable in an append-only metrics file."""
+
+    def test_every_task_in_a_run_shares_one_run_id(self):
+        runner = make_runner(lambda _q, _t, _c: "x")
+
+        metrics = [m for e in runner.run(QUESTIONS, reuse_cache=False) if (m := e.metric)]
+
+        assert len({m.run_id for m in metrics}) == 1
+        assert metrics[0].run_id
+
+    def test_two_runs_get_different_ids(self):
+        """Without this an A/B writes both arms into one undifferentiated file."""
+        first = make_runner(lambda _q, _t, _c: "x").run_id
+        second = make_runner(lambda _q, _t, _c: "x").run_id
+
+        assert first != second
+
+    def test_a_record_carries_the_configuration_under_test(self, settings):
+        tuned = replace(settings, specialist_effort="low")
+        runner = make_runner(lambda _q, _t, _c: "x", settings=tuned)
+
+        metric = runner.run_one(QUESTIONS[0])
+
+        assert metric.effort == "low"
+
+    def test_an_unset_effort_is_recorded_as_the_default(self, settings):
+        """Blank would be ambiguous with 'this run predates the field'."""
+        plain = replace(settings, specialist_effort="")
+
+        assert (
+            make_runner(lambda _q, _t, _c: "x", settings=plain).run_one(QUESTIONS[0]).effort
+            == "default"
+        )
+
+    def test_a_record_is_timestamped(self):
+        metric = make_runner(lambda _q, _t, _c: "x").run_one(QUESTIONS[0])
+
+        assert metric.recorded_at.startswith("20")
+
+    def test_cost_is_recorded_per_task(self, settings, monkeypatch):
+        monkeypatch.setattr(harness, "cost_of", lambda *_: 0.0470)
+
+        assert make_runner(lambda _q, _t, _c: "x").run_one(QUESTIONS[0]).cost_usd == 0.047
