@@ -337,11 +337,26 @@ class Orchestrator:
         # once emitted 4,344 tokens of a single sentence repeated.
         capped = get_llm().bind(max_tokens=self.settings.max_answer_tokens)
         finalizer = with_effort(capped, self.settings.finalizer_effort)
+        shaped = normalize(messages)
         try:
+            reply = finalizer.invoke(shaped)
+
+            # The transcript carries the task text, so the finalizer is declined
+            # by the same classifier as the router and the specialist. Wiring the
+            # retry into those two and not this one left a task that had been
+            # solved - the specialist reversed the text and answered "right" -
+            # ending with an empty final answer.
+            category = refusal_category(reply)
+            fallback = self.settings.refusal_fallback_model
+            if category and fallback:
+                log.warning("Finalizer declined (%s) - retrying on %s.", category, fallback)
+                rescue = build_for(fallback).bind(max_tokens=self.settings.max_answer_tokens)
+                reply = rescue.invoke(shaped)
+
             # text_of, not str(...content): with thinking enabled the content is
             # a list of typed blocks, and str() over it yields the repr - which
             # once shipped `[{'signature': 'EsEECpAB...` as a final answer.
-            content = clean_answer(text_of(finalizer.invoke(normalize(messages))))
+            content = clean_answer(text_of(reply))
         except Exception as exc:
             log.error("Finalizer failed: %s", exc)
             raise

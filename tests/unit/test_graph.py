@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.config import Settings, load_settings
+from agent.core import graph as graph_module
 from agent.core.graph import (
     FINISH,
     Orchestrator,
@@ -577,3 +578,45 @@ class TestRefusalFallback:
         )
 
         assert state["next_agent"] in {"code_agent", FINISH}
+
+
+class TestFinalizerRefusal:
+    """The finalizer sees the task text too, so it is declined too.
+
+    Wiring the retry into the router and the specialist but not here left a
+    task that had actually been solved - the specialist reversed the text and
+    answered "right" - ending with an empty final answer and a recorded
+    failure. Three call sites are handed the task; all three need the retry.
+    """
+
+    def test_a_declined_finalizer_is_retried(self, settings, stub_llm, monkeypatch):
+        llm = stub_llm(reply="right")
+        rescued = []
+
+        def fake_build_for(name: str):
+            rescued.append(name)
+            return llm
+
+        monkeypatch.setattr(graph_module, "build_for", fake_build_for)
+        monkeypatch.setattr(
+            graph_module, "refusal_category", lambda reply: "general_harms" if not rescued else ""
+        )
+
+        state = Orchestrator(settings)._finalize(
+            {"messages": [HumanMessage(content="reversed")], "steps": 0}
+        )
+
+        assert rescued == [settings.refusal_fallback_model]
+        assert str(state["messages"][0].content) == "right"
+
+    def test_an_ordinary_reply_is_not_retried(self, settings, stub_llm, monkeypatch):
+        stub_llm(reply="right")
+        monkeypatch.setattr(
+            graph_module, "build_for", lambda _n: pytest.fail("should not have retried")
+        )
+
+        state = Orchestrator(settings)._finalize(
+            {"messages": [HumanMessage(content="q")], "steps": 0}
+        )
+
+        assert str(state["messages"][0].content) == "right"
