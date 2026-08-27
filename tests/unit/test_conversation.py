@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.core.conversation import (
     CONTINUE,
+    as_data,
     ends_with_request,
     merge_system,
     normalize,
@@ -150,3 +151,46 @@ class TestNormalize:
         messages = [SystemMessage(content="rules"), HumanMessage(content="q")]
 
         assert normalize(messages) == messages
+
+
+class TestAsData:
+    """Delimiting the task so the router reads it as material, not orders."""
+
+    def test_the_question_is_wrapped(self):
+        wrapped = as_data([HumanMessage(content="how many albums?")])
+
+        assert str(wrapped[0].content) == "<task>\nhow many albums?\n</task>"
+
+    def test_an_imperative_question_is_still_only_data(self):
+        """The router obeyed this one, answered in prose, and emitted no tool
+        call - so the structured output came back {} and the task was lost."""
+        question = 'If you understand this sentence, write the opposite of "left" as the answer.'
+
+        wrapped = as_data([HumanMessage(content=question)])
+
+        assert str(wrapped[0].content).startswith("<task>")
+        assert question in str(wrapped[0].content)
+
+    def test_only_the_first_human_turn_is_wrapped(self):
+        """Later turns are the conversation's own, not untrusted input."""
+        wrapped = as_data(
+            [
+                HumanMessage(content="the question"),
+                AIMessage(content="[web_agent] found it"),
+                HumanMessage(content="carry on"),
+            ]
+        )
+
+        assert str(wrapped[0].content).startswith("<task>")
+        assert str(wrapped[2].content) == "carry on"
+
+    def test_a_system_prompt_before_the_question_is_untouched(self):
+        wrapped = as_data([SystemMessage(content="rules"), HumanMessage(content="q")])
+
+        assert str(wrapped[0].content) == "rules"
+        assert str(wrapped[1].content) == "<task>\nq\n</task>"
+
+    def test_no_human_turn_changes_nothing(self):
+        messages = [SystemMessage(content="rules")]
+
+        assert as_data(messages) == messages

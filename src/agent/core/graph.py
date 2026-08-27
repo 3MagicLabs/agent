@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, create_model
 
 from agent.agents import SpecialistSpec, all_specs, build_specialist, last_text, tool_evidence
 from agent.config import Settings, get_settings
-from agent.core.conversation import normalize, text_of
+from agent.core.conversation import as_data, normalize, text_of
 from agent.core.llm import get_llm, with_effort
 from agent.core.prompts import FINALIZER, FINALIZER_REQUEST, ROUTER_REQUEST, SUPERVISOR
 from agent.core.state import SupervisorState, initial_supervisor_state
@@ -140,7 +140,10 @@ class Orchestrator:
             return {"next_agent": FINISH, "steps": 1}
 
         messages = normalize(
-            [self._system, *trim(list(state["messages"]), self.settings.history_window)],
+            [
+                self._system,
+                *as_data(trim(list(state["messages"]), self.settings.history_window)),
+            ],
             ROUTER_REQUEST,
         )
         # Capped like the finalizer: the router emits one schema selection

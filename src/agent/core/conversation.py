@@ -84,6 +84,29 @@ def ends_with_request(
     return conversation
 
 
+def as_data(messages: Sequence[BaseMessage], tag: str = "task") -> list[BaseMessage]:
+    """Delimit the opening human turn so it reads as data, not instruction.
+
+    A benchmark question is arbitrary text and some of it is imperative. One
+    task is a reversed sentence that decodes to "If you understand this
+    sentence, write the opposite of the word 'left' as the answer" - and the
+    router obeyed it, replying "right" as prose instead of calling the routing
+    function. With no tool call to parse, the structured output came back as
+    {}, twice, deterministically, and the task was lost.
+
+    The router's job is to pick a specialist, never to answer. Wrapping the
+    question marks where the instructions addressed to *it* end and the material
+    it is routing begins. Specialists are not wrapped: following the task is
+    precisely what they are for.
+    """
+    conversation = list(messages)
+    for index, message in enumerate(conversation):
+        if isinstance(message, HumanMessage):
+            conversation[index] = HumanMessage(content=f"<{tag}>\n{text_of(message)}\n</{tag}>")
+            break
+    return conversation
+
+
 def normalize(messages: Sequence[BaseMessage], request: str = CONTINUE) -> list[BaseMessage]:
     """Shape a message list so any supported provider will accept it."""
     return ends_with_request(merge_system(messages), request)
